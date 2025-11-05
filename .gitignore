@@ -72,6 +72,7 @@ desktop.ini
 *.db
 *.sql
 *.bak
+logs/
 
 # Jupyter Notebook
 .ipynb_checkpoints
