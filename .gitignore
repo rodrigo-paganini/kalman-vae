@@ -1,0 +1,120 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# C extensions
+*.so
+
+# Distribution / packaging
+build/
+dist/
+eggs/
+*.egg-info/
+*.egg
+pip-wheel-metadata/
+share/python-wheels/
+*.whl
+
+# Installer logs
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Unit test / coverage
+htmlcov/
+.tox/
+.nox/
+.coverage
+.coverage.*
+.cache
+pytest_cache/
+.pytest_cache/
+nosetests.xml
+coverage.xml
+
+# PyInstaller
+*.manifest
+*.spec
+
+# Virtual environments
+venv/
+ENV/
+env/
+.env/
+.venv/
+env.bak/
+venv.bak/
+venv-*/
+
+# Poetry / Pipenv / Conda
+.python-version
+poetry.lock
+Pipfile.lock
+.conda/
+conda-meta/
+
+# IDEs and editors
+.vscode/
+.idea/
+*.sublime-workspace
+*.sublime-project
+
+# macOS
+.DS_Store
+
+# Windows
+Thumbs.db
+desktop.ini
+
+# Logs and databases
+*.log
+*.sqlite3
+*.db
+*.sql
+*.bak
+
+# Jupyter Notebook
+.ipynb_checkpoints
+*.ipynb
+
+# IPython
+profile_default/
+ipython_config.py
+
+# Pyre / Mypy / Ruff
+.mypy_cache/
+.pyre/
+.ruff_cache/
+
+# TensorBoard, checkpoints, weights, outputs
+runs/
+wandb/
+checkpoints/
+checkpoints_*/
+saved_models/
+models/
+weights/
+*.ckpt
+*.pth
+*.pt
+
+# Data
+data/
+datasets/
+raw_data/
+processed_data/
+outputs/
+results/
+
+# Environment & secrets
+*.env
+.env.local
+.env.*.local
+.envrc
+secrets.toml
+credentials/
+
+# Misc
+*.bak
+*.swp
+*.swo
