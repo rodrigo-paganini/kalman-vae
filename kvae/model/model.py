@@ -4,10 +4,10 @@ from torch.nn import functional as F
 
 from typing import Optional, Tuple, Dict
 
-from kvae.utils import KVAEConfig
-from kvae.vae import Encoder, Decoder
-from kvae.lgssm import LGSSM
-from kvae.lstm import DynamicsParameterNetwork
+from kvae.model.config import KVAEConfig
+from kvae.model.vae import Encoder, Decoder
+from kvae.model.lgssm import LGSSM
+from kvae.model.lstm import DynamicsParameterNetwork
 
 
 

@@ -25,10 +25,10 @@ from pytorch_lightning.loggers import TensorBoardLogger
 from pytorch_lightning.callbacks import ModelCheckpoint
 from torch.utils.data import DataLoader, random_split
 
-from kvae.utils import KVAEConfig
-from kvae.model import KVAE
-from kvae.dataloader import make_toy_dataset
-from kvae.pymunk_dataset import PymunkNPZDataset
+from kvae.model.config import KVAEConfig
+from kvae.model.model import KVAE
+from kvae.data_loading.dataloader import make_toy_dataset
+from kvae.data_loading.pymunk_dataset import PymunkNPZDataset
 
 
 class KVAELit(pl.LightningModule):
@@ -191,7 +191,7 @@ def main():
     p.add_argument('--batch-size', type=int, default=16)
     p.add_argument('--lr', type=float, default=1e-3)
     p.add_argument('--logdir', type=str, default='logs')
-    p.add_argument('--config', type=str, default='config.yaml', help='Path to YAML/JSON config file (defaults to ./config.yaml if present)')
+    p.add_argument('--config', type=str, default='train/config.yaml', help='Path to YAML/JSON config file (defaults to ./train/config.yaml if present)')
     p.add_argument('--num-seq', type=int, default=200)
     p.add_argument('--T', type=int, default=10)
     p.add_argument('--gpus', type=int, default=0)

@@ -2,10 +2,10 @@
 
 Expose useful submodules at package level for convenient imports.
 """
-from .lgssm import *
-from .lstm import *
-from .model import *
-from .utils import *
-from .vae import *
+from kvae.model.lgssm import *
+from kvae.model.lstm import *
+from kvae.model.model import *
+from kvae.model.config import *
+from kvae.model.vae import *
 
 __all__ = []

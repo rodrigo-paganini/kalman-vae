@@ -3,7 +3,7 @@ import torch
 
 from typing import Optional, Tuple, Dict
 
-from kvae.utils import KVAEConfig
+from kvae.model.config import KVAEConfig
 
 class LGSSM(nn.Module):
     """

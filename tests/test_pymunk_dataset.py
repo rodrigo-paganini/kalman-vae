@@ -2,7 +2,8 @@ import json
 import numpy as np
 import torch
 from pathlib import Path
-from kvae.pymunk_dataset import PymunkNPZDataset
+
+from kvae.data_loading.pymunk_dataset import PymunkNPZDataset
 
 
 def make_npz(path: Path, N=5, T=20, H=32, W=32, D=4):

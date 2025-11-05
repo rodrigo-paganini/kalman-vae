@@ -3,7 +3,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from kvae.utils import KVAEConfig
+from kvae.model.config import KVAEConfig
 
 
 class DynamicsParameterNetwork(nn.Module):
