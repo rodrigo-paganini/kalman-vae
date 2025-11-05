@@ -1,0 +1,25 @@
+# KVAE training config template
+# Put this file at the project root or pass --config path/to/config.yaml
+
+dataset:
+  # 'toy' or 'pymunk'
+  type: pymunk
+  # for 'pymunk' sets path to the .npz file containing 'images' and 'state'
+  path: /data/box.npz
+  kwargs: {}
+
+transforms:
+  # add gaussian noise to images (std)
+  add_noise_std: 0.0
+
+training:
+  max_epochs: 20
+  batch_size: 32
+  lr: 0.001
+  ckpt_every: 5
+  gpus: 0
+  # device: 'auto'|'cpu'|'cuda'|'mps' - if 'auto', script will prefer cuda, then mps, then cpu
+  device: auto
+  logdir: logs
+
+# Any other user fields are accepted and ignored by default
