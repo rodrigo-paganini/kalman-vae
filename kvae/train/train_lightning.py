@@ -40,25 +40,51 @@ class KVAELit(pl.LightningModule):
         self.cfg = cfg
         self.model = KVAE(cfg)
         self.lr = lr
-
+        
         # placeholders for validation-image logging
         self._val_orig = None
         self._val_recon = None
+
+        # Running aggregates for epoch-level metrics (Lightning v2: use on_train_epoch_end)
+        self._train_loss_sum = 0.0
+        self._train_loss_count = 0
+        self._val_loss_sum = 0.0
+        self._val_loss_count = 0
 
     def forward(self, x):
         return self.model(x)
 
     def training_step(self, batch, batch_idx):
-        x = batch[0]
+        # support datasets that return either tensors (TensorDataset) or dicts
+        if isinstance(batch, dict):
+            x = batch.get('images')
+        elif isinstance(batch, (list, tuple)):
+            x = batch[0]
+        else:
+            x = batch
         out = self.model(x)
         losses = self.model.compute_loss(x, out)
         self.log('train/total_loss', losses['total_loss'], on_step=True, on_epoch=True, prog_bar=True)
         self.log('train/recon_loss', losses['recon_loss'], on_step=True, on_epoch=True)
         self.log('train/kl_loss', losses['kl_loss'], on_step=True, on_epoch=True)
+        # accumulate for epoch-level logging (v2 compatibility)
+        try:
+            self._train_loss_sum += float(losses['total_loss'].detach().cpu().item())
+        except Exception:
+            # fallback if it's already a float
+            self._train_loss_sum += float(losses['total_loss'])
+        self._train_loss_count += 1
+
         return losses['total_loss']
 
     def validation_step(self, batch, batch_idx):
-        x = batch[0]
+        # support datasets that return either tensors (TensorDataset) or dicts
+        if isinstance(batch, dict):
+            x = batch.get('images')
+        elif isinstance(batch, (list, tuple)):
+            x = batch[0]
+        else:
+            x = batch
         out = self.model(x)
         losses = self.model.compute_loss(x, out)
         self.log('val/total_loss', losses['total_loss'], on_step=False, on_epoch=True, prog_bar=True)
@@ -68,38 +94,51 @@ class KVAELit(pl.LightningModule):
             self._val_orig = x[:1].detach().cpu()
             self._val_recon = out['x_recon'][:1].detach().cpu()
 
-        return losses['total_loss']
-
-    def training_epoch_end(self, outputs):
-        # outputs is a list of tensors (losses) returned by training_step
+        # accumulate for epoch-level logging
         try:
-            vals = torch.stack([o for o in outputs])
-            mean = float(vals.mean().detach().cpu().item())
+            self._val_loss_sum += float(losses['total_loss'].detach().cpu().item())
         except Exception:
-            # fallback: convert items to float
-            vals = [float(o) for o in outputs]
-            mean = sum(vals) / max(1, len(vals))
+            self._val_loss_sum += float(losses['total_loss'])
+        self._val_loss_count += 1
+
+        return losses['total_loss']
+    def on_train_epoch_end(self):
+        """Aggregate and log training epoch metrics (replacement for training_epoch_end)."""
+        if self._train_loss_count > 0:
+            mean = self._train_loss_sum / float(self._train_loss_count)
+        else:
+            mean = 0.0
         import logging
         logging.getLogger('kvae.train').info(f'Epoch {self.current_epoch} train_loss={mean:.6f}')
-
-    def validation_epoch_end(self, outputs):
-        # outputs is a list of tensors returned by validation_step
+        # also log to Lightning logger as an epoch metric
         try:
-            vals = torch.stack([o for o in outputs])
-            mean = float(vals.mean().detach().cpu().item())
+            self.log('train/epoch_loss', mean, prog_bar=True, logger=True)
         except Exception:
-            vals = [float(o) for o in outputs if o is not None]
-            mean = sum(vals) / max(1, len(vals)) if vals else 0.0
-        import logging
-        logging.getLogger('kvae.train').info(f'Epoch {self.current_epoch} val_loss={mean:.6f}')
+            pass
+        # reset counters
+        self._train_loss_sum = 0.0
+        self._train_loss_count = 0
 
     def on_validation_epoch_end(self):
+        # Aggregate and log validation epoch loss (v2 replacement for validation_epoch_end)
+        if self._val_loss_count > 0:
+            val_mean = self._val_loss_sum / float(self._val_loss_count)
+        else:
+            val_mean = 0.0
+        import logging
+        logging.getLogger('kvae.train').info(f'Epoch {self.current_epoch} val_loss={val_mean:.6f}')
+        try:
+            self.log('val/epoch_loss', val_mean, prog_bar=True, logger=True)
+        except Exception:
+            pass
+        # reset validation counters
+        self._val_loss_sum = 0.0
+        self._val_loss_count = 0
+
         # log images to TensorBoard if logger supports experiment
-        if self._val_orig is None or self._val_recon is None:
-            return
         logger = self.logger
         # pytorch_lightning logger exposes experiment (tensorboard SummaryWriter)
-        if hasattr(logger, 'experiment'):
+        if hasattr(logger, 'experiment') and self._val_orig is not None and self._val_recon is not None:
             tb = logger.experiment
             # self._val_orig shape: [B=1, T, C, H, W] -> remove batch dim and log frames as images
             orig = self._val_orig.squeeze(0)  # [T, C, H, W]
@@ -117,7 +156,7 @@ class KVAELit(pl.LightningModule):
             tb.add_images('val/orig', orig_n, self.current_epoch)
             tb.add_images('val/recon', recon_n, self.current_epoch)
 
-        # drop references
+        # drop references used for image logging
         self._val_orig = None
         self._val_recon = None
 

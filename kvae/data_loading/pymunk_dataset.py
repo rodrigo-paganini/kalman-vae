@@ -92,34 +92,54 @@ class PymunkNPZDataset(PymunkBaseDataset):
         elif imgs.ndim == 4:
             # ambiguous: could be (N, T, H, W) or (F, C, H, W)
             N, D1, D2, D3 = imgs.shape
-            # Heuristic: if D1 equals seq_len or D1 > 1 and D2 small -> treat as (N,T,H,W)
-            if D1 == self.seq_len:
+            # Better heuristic:
+            # - If the last two dims look like image HxW (>=8) treat as temporal axis T -> (N,T,H,W)
+            # - Else if D1 looks like channels (1 or 3) treat as frames (F,C,H,W)
+            # - Fallback: treat as frames without explicit channel -> add channel axis
+            if D2 >= 8 and D3 >= 8:
                 # (N, T, H, W) -> add channel dim
                 self.seq_data = imgs[:, :, None, :, :]
-            elif N == self.seq_len:
-                # (T, C, H, W) for single sequence -> wrap
-                self.seq_data = imgs[None, :, :, :, :]
-            else:
-                # treat as flat frames (F, H, W) or (F, C, H, W) -> build sliding windows
-                # ensure channel dim
-                if D1 in (1, 3):
-                    # ambiguous but assume (F, C, H, W)
-                    frames = imgs
-                else:
-                    # assume (F, H, W)
-                    frames = imgs[:, None, :, :]
+            elif D1 in (1, 3) and D2 >= 8 and D3 >= 8:
+                # ambiguous but likely (F, C, H, W)
+                frames = imgs
                 self._build_from_frames(frames)
-                return
+            else:
+                # assume (F, H, W) -> add channel and build sliding windows
+                frames = imgs[:, None, :, :]
+                self._build_from_frames(frames)
         elif imgs.ndim == 3:
             # (F, H, W) -> add channel
             frames = imgs[:, None, :, :]
             self._build_from_frames(frames)
-            return
         else:
             raise ValueError(f"Unsupported image array shape: {imgs.shape}")
 
-        # if we have seq_data already as (N,T,C,H,W), build index trivially
-        self.N, self.T, self.C, self.H, self.W = self.seq_data.shape
+        # normalize seq_data shape into (N, T, C, H, W)
+        shape = self.seq_data.shape
+        if len(shape) == 5:
+            self.N, self.T, self.C, self.H, self.W = shape
+        elif len(shape) == 4:
+            # (N, T, H, W) -> assume single channel
+            self.N, self.T, self.H, self.W = shape
+            self.C = 1
+            # reshape to (N, T, C, H, W)
+            self.seq_data = self.seq_data.reshape(self.N, self.T, self.C, self.H, self.W)
+        elif len(shape) > 5:
+            # Unexpected extra dims: collapse middle dims into channel dim.
+            # e.g., (N, T, d1, d2, ..., H, W) -> C = prod(d1..dK)
+            self.N = shape[0]
+            self.T = shape[1]
+            self.H = shape[-2]
+            self.W = shape[-1]
+            mid = shape[2:-2]
+            C = 1
+            for d in mid:
+                C *= int(d)
+            self.C = C
+            # reshape by collapsing middle dims into channel
+            self.seq_data = self.seq_data.reshape(self.N, self.T, self.C, self.H, self.W)
+        else:
+            raise ValueError(f'Unexpected sequence data shape: {shape}')
 
         # load states if available and aligned
         self.state_data = None
@@ -136,16 +156,36 @@ class PymunkNPZDataset(PymunkBaseDataset):
         self.index = list(range(self.N))
 
     def _build_from_frames(self, frames: np.ndarray):
-        # frames: (F, C, H, W)
+        # frames: expected (F, C, H, W) but be robust to extra middle dims
         F = frames.shape[0]
         if F < self.seq_len:
             raise ValueError(f'Not enough frames ({F}) for seq_len={self.seq_len}')
+
+        # Ensure frames have shape (F, C, H, W). If frames have extra middle dims
+        # (e.g. (F, d1, d2, H, W)), collapse them into a single channel dimension.
+        frame_shape = frames.shape[1:]
+        if len(frame_shape) == 3:
+            C, H, W = frame_shape
+        elif len(frame_shape) > 3:
+            # collapse middle dims into channel
+            mid = frame_shape[:-2]
+            H = frame_shape[-2]
+            W = frame_shape[-1]
+            C = 1
+            for d in mid:
+                C *= int(d)
+            frames = frames.reshape(F, C, H, W)
+        else:
+            raise ValueError(f'Unsupported frame shape: {frames.shape}')
+
         seqs = []
         for start in range(0, F - self.seq_len + 1, self.stride):
             seq = frames[start: start + self.seq_len]  # (T, C, H, W)
             seqs.append(seq)
         seqs = np.stack(seqs, axis=0)  # (N, T, C, H, W)
         self.seq_data = seqs
+
+        # Now shape should be (N, T, C, H, W)
         self.N, self.T, self.C, self.H, self.W = self.seq_data.shape
         self.index = list(range(self.N))
 
