@@ -3,5 +3,5 @@
 For full dev installation, execute:
 
 ```
-pip install -e '.[dev]'s
+pip install -e '.[dev]'
 ```

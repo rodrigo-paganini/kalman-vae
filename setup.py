@@ -5,10 +5,14 @@ setup(
     version='0.1.0',
     description='KVAE implementation with PyTorch',
     packages=find_packages(),
-    python_requires='>=3.10,<3.11',
+    python_requires='>=3.10',
     install_requires=[
         'numpy',
         'torch',
+        'lightning',
+        'tqdm',
+        'matplotlib',
+        'seaborn',
     ],
     extras_require={
         'dev': ['pytest'],
