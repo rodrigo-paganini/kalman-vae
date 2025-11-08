@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 
-from typing import List
+from typing import Tuple
 
 @dataclass
 class KVAEConfig:
@@ -17,9 +17,15 @@ class KVAEConfig:
     num_modes: int = 3  # K in the paper
     
     # VAE architecture
-    encoder_channels: List[int] = None
-    decoder_channels: List[int] = None
-    
+    encoder_channels: Tuple[int] = None
+    encoder_kernel_size: int = 3
+    encoder_stride: int = 2
+    encoder_padding: int = 1
+    decoder_channels: Tuple[int] = None
+    decoder_kernel_size: int = 3
+    decoder_stride: int = 2
+    decoder_padding: int = 1
+
     # Dynamics network
     dynamics_hidden_dim: int = 64
     

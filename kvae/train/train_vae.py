@@ -1,13 +1,10 @@
-"""PyTorch Lightning training script for KVAE.
+"""PyTorch Lightning training script for the VAE-only component.
 
-Provides:
-- KVAELit: LightningModule wrapping the KVAE model and loss
-- KVAEDataModule: DataModule using the toy dataset for quick experiments
-- CLI entrypoint that launches a Lightning Trainer with TensorBoard logging
+This mirrors the style of `train_lightning.py` but trains only the
+Encoder/Decoder (VAE) using the same `KVAEConfig` for compatibility.
 
 Usage:
-    pip install -e '.[dev]'
-    python train_lightning.py --max-epochs 10 --batch-size 32
+    python -m kvae.train.train_vae --max-epochs 10 --batch-size 32
 
 """
 from __future__ import annotations
@@ -26,82 +23,133 @@ from pytorch_lightning.callbacks import ModelCheckpoint
 from torch.utils.data import DataLoader, random_split
 
 from kvae.model.config import KVAEConfig
-from kvae.model.model import KVAE
+from kvae.model.vae import Encoder, Decoder
 from kvae.data_loading.dataloader import make_toy_dataset
 from kvae.data_loading.pymunk_dataset import PymunkNPZDataset
 
 
-class KVAELit(pl.LightningModule):
-    """LightningModule wrapper for KVAE."""
+class VAELit(pl.LightningModule):
+    """LightningModule wrapper for a simple VAE (Encoder + Decoder).
+
+    The VAE encodes per-frame images a_t ~ q(a|x) and decodes them back.
+    We train with a standard ELBO: MSE reconstruction + KL(q||N(0,I)).
+    """
 
     def __init__(self, cfg: KVAEConfig, lr: float = 1e-3):
         super().__init__()
         self.save_hyperparameters({'lr': lr})
         self.cfg = cfg
-        self.model = KVAE(cfg)
+        self.encoder = Encoder(cfg)
+        self.decoder = Decoder(cfg)
         self.lr = lr
-        
         # placeholders for validation-image logging
         self._val_orig = None
         self._val_recon = None
 
-        # Running aggregates for epoch-level metrics (Lightning v2: use on_train_epoch_end)
+        # Running aggregates for epoch-level metrics
         self._train_loss_sum = 0.0
         self._train_loss_count = 0
         self._val_loss_sum = 0.0
         self._val_loss_count = 0
 
-    def forward(self, x):
-        return self.model(x)
+    def reparameterize(self, mu: torch.Tensor, logvar: torch.Tensor) -> torch.Tensor:
+        std = torch.exp(0.5 * logvar)
+        eps = torch.randn_like(std)
+        return mu + eps * std
+
+    def forward(self, x: torch.Tensor) -> dict:
+        # x: [B, T, C, H, W]
+        B, T = x.shape[:2]
+        x_flat = x.view(-1, *x.shape[2:])  # [B*T, C, H, W]
+        mu, logvar = self.encoder(x_flat)
+        a = self.reparameterize(mu, logvar)
+        x_recon_flat = self.decoder(a)
+        x_recon = x_recon_flat.view(B, T, *x_recon_flat.shape[1:])
+        # reshape mus/logvars
+        mu = mu.view(B, T, -1)
+        logvar = logvar.view(B, T, -1)
+        return {'x_recon': x_recon, 'a_mu': mu, 'a_logvar': logvar}
 
     def training_step(self, batch, batch_idx):
-        # support datasets that return either tensors (TensorDataset) or dicts
+        # support dicts and simple TensorDataset
         if isinstance(batch, dict):
             x = batch.get('images')
         elif isinstance(batch, (list, tuple)):
             x = batch[0]
         else:
             x = batch
-        out = self.model(x)
-        losses = self.model.compute_loss(x, out)
-        self.log('train/total_loss', losses['total_loss'], on_step=True, on_epoch=True, prog_bar=True)
-        self.log('train/recon_loss', losses['recon_loss'], on_step=True, on_epoch=True)
-        self.log('train/kl_loss', losses['kl_loss'], on_step=True, on_epoch=True)
-        # accumulate for epoch-level logging (v2 compatibility)
+
+        out = self.forward(x)
+
+        # Reconstruction term: negative log-likelihood under an isotropic
+        # Gaussian p(x|a) = N(x_recon, I). Up to an additive constant,
+        # -log p(x|a) = 0.5 * ||x - x_recon||^2. We sum over all pixels and
+        # time-steps then average over the batch so the loss is on a per-sample
+        # scale (consistent with the KL below).
+        mse_sum = torch.nn.functional.mse_loss(out['x_recon'], x, reduction='sum')
+        recon = 0.5 * mse_sum / x.shape[0]
+        # optional scaling term preserved from original code (keeps compatibility)
+        if getattr(self.cfg, 'recon_weight', None) is not None:
+            recon = recon * float(self.cfg.recon_weight)
+
+        mu = out['a_mu']
+        logvar = out['a_logvar']
+        # KL divergence between q(a|x)=N(mu,diag(exp(logvar))) and p(a)=N(0,I)
+        # sum over time and latent dims, then average over batch
+        kl = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp())
+        kl = kl / x.shape[0]
+
+        # ELBO (we minimize the negative ELBO): recon + KL
+        total = recon + kl
+        self.log('train/total_loss', total, on_step=True, on_epoch=True, prog_bar=True)
+        self.log('train/recon_loss', recon, on_step=True, on_epoch=True)
+        self.log('train/kl_loss', kl, on_step=True, on_epoch=True)
+
+        # accumulate for epoch-level logging
         try:
-            self._train_loss_sum += float(losses['total_loss'].detach().cpu().item())
+            self._train_loss_sum += float(total.detach().cpu().item())
         except Exception:
-            # fallback if it's already a float
-            self._train_loss_sum += float(losses['total_loss'])
+            self._train_loss_sum += float(total)
         self._train_loss_count += 1
 
-        return losses['total_loss']
+        return total
 
     def validation_step(self, batch, batch_idx):
-        # support datasets that return either tensors (TensorDataset) or dicts
         if isinstance(batch, dict):
             x = batch.get('images')
         elif isinstance(batch, (list, tuple)):
             x = batch[0]
         else:
             x = batch
-        out = self.model(x)
-        losses = self.model.compute_loss(x, out)
-        self.log('val/total_loss', losses['total_loss'], on_step=False, on_epoch=True, prog_bar=True)
+
+        out = self.forward(x)
+        mse_sum = torch.nn.functional.mse_loss(out['x_recon'], x, reduction='sum')
+        # note: use the same convention as training: 0.5 * sum-squared per sample
+        recon = 0.5 * torch.nn.functional.mse_loss(out['x_recon'], x, reduction='sum') / x.shape[0]
+        if getattr(self.cfg, 'recon_weight', None) is not None:
+            recon = recon * float(self.cfg.recon_weight)
+        mu = out['a_mu']
+        logvar = out['a_logvar']
+        kl = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp())
+        kl = kl / x.shape[0]
+        total = recon + kl
+        self.log('val/total_loss', total, on_step=False, on_epoch=True, prog_bar=True)
 
         # keep first batch's first sequence for image logging at epoch end
         if batch_idx == 0:
+            # x has shape [B, T, C, H, W]
             self._val_orig = x[:1].detach().cpu()
             self._val_recon = out['x_recon'][:1].detach().cpu()
 
         # accumulate for epoch-level logging
         try:
-            self._val_loss_sum += float(losses['total_loss'].detach().cpu().item())
+            self._val_loss_sum += float(total.detach().cpu().item())
         except Exception:
-            self._val_loss_sum += float(losses['total_loss'])
+            self._val_loss_sum += float(total)
         self._val_loss_count += 1
 
-        return losses['total_loss']
+        return total
+
     def on_train_epoch_end(self):
         """Aggregate and log training epoch metrics (replacement for training_epoch_end)."""
         if self._train_loss_count > 0:
@@ -110,7 +158,6 @@ class KVAELit(pl.LightningModule):
             mean = 0.0
         import logging
         logging.getLogger('kvae.train').info(f'Epoch {self.current_epoch} train_loss={mean:.6f}')
-        # also log to Lightning logger as an epoch metric
         try:
             self.log('train/epoch_loss', mean, prog_bar=True, logger=True)
         except Exception:
@@ -120,7 +167,7 @@ class KVAELit(pl.LightningModule):
         self._train_loss_count = 0
 
     def on_validation_epoch_end(self):
-        # Aggregate and log validation epoch loss (v2 replacement for validation_epoch_end)
+        # Aggregate and log validation epoch loss
         if self._val_loss_count > 0:
             val_mean = self._val_loss_sum / float(self._val_loss_count)
         else:
@@ -137,13 +184,11 @@ class KVAELit(pl.LightningModule):
 
         # log images to TensorBoard if logger supports experiment
         logger = self.logger
-        # pytorch_lightning logger exposes experiment (tensorboard SummaryWriter)
         if hasattr(logger, 'experiment') and self._val_orig is not None and self._val_recon is not None:
             tb = logger.experiment
-            # self._val_orig shape: [B=1, T, C, H, W] -> remove batch dim and log frames as images
             orig = self._val_orig.squeeze(0)  # [T, C, H, W]
             recon = self._val_recon.squeeze(0)
-            # normalize per-frame
+
             def norm(imgs: torch.Tensor) -> torch.Tensor:
                 imgs = imgs.clone()
                 imgs -= imgs.view(imgs.size(0), -1).min(dim=1)[0].view(-1, 1, 1, 1)
@@ -161,11 +206,11 @@ class KVAELit(pl.LightningModule):
         self._val_recon = None
 
     def configure_optimizers(self):
-        opt = torch.optim.Adam(self.model.parameters(), lr=self.lr)
+        opt = torch.optim.Adam(list(self.encoder.parameters()) + list(self.decoder.parameters()), lr=self.lr)
         return opt
 
 
-class KVAEDataModule(pl.LightningDataModule):
+class VAEDataModule(pl.LightningDataModule):
     def __init__(self, cfg: KVAEConfig, batch_size: int = 16, num_seq: int = 200, T: int = 10,
                  dataset_type: str = 'toy', dataset_path: Optional[str] = None,
                  dataset_kwargs: Optional[dict] = None, transform_fn: Optional[Callable] = None):
@@ -192,7 +237,6 @@ class KVAEDataModule(pl.LightningDataModule):
         else:
             raise ValueError(f'Unknown dataset_type: {self.dataset_type}')
 
-        # Optionally wrap with transform
         if self.transform_fn is not None:
             ds = TransformDataset(ds, self.transform_fn)
 
@@ -208,10 +252,6 @@ class KVAEDataModule(pl.LightningDataModule):
 
 
 class TransformDataset(torch.utils.data.Dataset):
-    """Wraps an existing dataset and applies a transform function to each item.
-
-    The transform function should accept and return a dict-like item.
-    """
     def __init__(self, base_ds, transform_fn: Callable):
         self.base = base_ds
         self.transform_fn = transform_fn
@@ -229,29 +269,25 @@ def main():
     p.add_argument('--max-epochs', type=int, default=10)
     p.add_argument('--batch-size', type=int, default=16)
     p.add_argument('--lr', type=float, default=1e-3)
-    p.add_argument('--logdir', type=str, default='logs')
-    p.add_argument('--config', type=str, default='kvae/train/config.yaml', help='Path to YAML/JSON config file (defaults to ./kvae/train/config.yaml if present)')
+    p.add_argument('--logdir', type=str, default='runs')
+    p.add_argument('--config', type=str, default='kvae/train/config.yaml', help='Path to YAML/JSON config file')
     p.add_argument('--num-seq', type=int, default=200)
     p.add_argument('--T', type=int, default=10)
     p.add_argument('--gpus', type=int, default=0)
     p.add_argument('--ckpt-every', type=int, default=5)
     args = p.parse_args()
 
-    # If a JSON config is provided, load it and override/extend CLI args
     config_path = args.config
     config = None
     if config_path and os.path.exists(config_path):
-        # support YAML or JSON configs
         with open(config_path, 'r') as f:
             if config_path.lower().endswith(('.yml', '.yaml')):
                 config = yaml.safe_load(f)
             else:
                 config = json.load(f)
 
-    # build components according to config
     cfg = KVAEConfig()
 
-    # determine dataset settings
     dataset_cfg = config.get('dataset') if config else None
     if dataset_cfg:
         ds_type = dataset_cfg.get('type', 'toy')
@@ -264,12 +300,9 @@ def main():
         ds_kwargs = {}
         transforms_cfg = {}
 
-    # build optional transform function
     def build_transform(tcfg: dict):
-        # simple transform builder: supports add_noise (std)
         noise_std = float(tcfg.get('add_noise_std', 0.0)) if tcfg else 0.0
         def transform(item: dict):
-            # item expected to be {'images': Tensor[T,C,H,W], ...}
             imgs = item['images'].float()
             if noise_std > 0:
                 imgs = imgs + torch.randn_like(imgs) * noise_std
@@ -279,10 +312,10 @@ def main():
 
     transform_fn = build_transform(transforms_cfg)
 
-    lit = KVAELit(cfg, lr=args.lr)
-    dm = KVAEDataModule(cfg, batch_size=args.batch_size, num_seq=args.num_seq, T=args.T,
-                        dataset_type=ds_type, dataset_path=ds_path, dataset_kwargs=ds_kwargs,
-                        transform_fn=transform_fn)
+    lit = VAELit(cfg, lr=args.lr)
+    dm = VAEDataModule(cfg, batch_size=args.batch_size, num_seq=args.num_seq, T=args.T,
+                       dataset_type=ds_type, dataset_path=ds_path, dataset_kwargs=ds_kwargs,
+                       transform_fn=transform_fn)
 
     # Create a timestamped run folder so each experiment is isolated: <logdir>/<timestamp>/
     import datetime
@@ -300,24 +333,21 @@ def main():
 
     # copy config into ckpt_root for reproducibility
     if config_path and os.path.exists(config_path):
-        shutil.copy(config_path, os.path.join(ckpt_root, 'config.json'))
+        shutil.copy(config_path, os.path.join(ckpt_root, 'config.yaml'))
 
     # write hparams.yaml with CLI args and model config
     try:
         from dataclasses import asdict
         hparams = {'args': vars(args), 'cfg': asdict(cfg)}
     except Exception:
-        # fallback if asdict not available
         hparams = {'args': vars(args), 'cfg': cfg.__dict__}
     with open(os.path.join(ckpt_root, 'hparams.yaml'), 'w') as hf:
         yaml.safe_dump(hparams, hf)
 
-    # Configure python logging to write into the run folder as well as stdout
     import logging
     # write training log into the run folder so each experiment is self-contained
     log_file = os.path.join(ckpt_root, 'train.log')
     root = logging.getLogger()
-    # reset handlers to avoid duplicate logs in repeated runs
     for h in list(root.handlers):
         root.removeHandler(h)
     root.setLevel(logging.INFO)
@@ -329,24 +359,22 @@ def main():
     sh.setFormatter(fmt)
     root.addHandler(sh)
 
-    # Save the checkpoint with the best validation VAE loss (minimize)
+    # Save the checkpoint with the best VAE validation loss (minimize)
     ckpt_callback_best = ModelCheckpoint(
         dirpath=ckpt_dir,
-        filename='best',
+        filename='vae-best',
         monitor='val/total_loss',
         mode='min',
         save_top_k=1,
     )
-    # Also keep periodic checkpoints for preview/history (every N epochs).
-    # This callback does not monitor a metric; it saves every `args.ckpt_every` epochs.
+    # Also keep periodic checkpoints for previews/history (every N epochs).
     ckpt_callback_periodic = ModelCheckpoint(
         dirpath=ckpt_dir,
-        filename='ckpt-{epoch}',
+        filename='vae-ckpt-{epoch}',
         every_n_epochs=args.ckpt_every,
         save_top_k=-1,
     )
 
-    # decide accelerator: support cuda, mps (Apple), or cpu. Allow override from config.training.device
     training_cfg = config.get('training', {}) if config else {}
     device_pref = training_cfg.get('device', 'auto')
 
@@ -357,30 +385,22 @@ def main():
         log_every_n_steps=10,
     )
 
-    # helper to set accelerator/devices
     def set_accelerator_for(trainer_kwargs: dict, device_pref: str):
         pref = (device_pref or 'auto').lower()
-        # explicit CPU
         if pref == 'cpu':
             trainer_kwargs.update({'accelerator': 'cpu', 'devices': 1})
             return trainer_kwargs
-
-        # prefer CUDA if requested/available
         if pref in ('cuda', 'gpu') or (pref == 'auto' and torch.cuda.is_available() and args.gpus > 0):
             devices = args.gpus if args.gpus > 0 else 1
             trainer_kwargs.update({'accelerator': 'gpu', 'devices': devices})
-
-        # MPS support
+            return trainer_kwargs
         try:
             mps_available = getattr(torch.backends, 'mps', None) is not None and torch.backends.mps.is_available()
         except Exception:
             mps_available = False
-
         if pref == 'mps' or (pref == 'auto' and mps_available):
             trainer_kwargs.update({'accelerator': 'mps', 'devices': 1})
             return trainer_kwargs
-
-        # fallback to CPU
         trainer_kwargs.update({'accelerator': 'cpu', 'devices': 1})
         return trainer_kwargs
 

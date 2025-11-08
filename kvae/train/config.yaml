@@ -20,6 +20,6 @@ training:
   gpus: 0
   # device: 'auto'|'cpu'|'cuda'|'mps' - if 'auto', script will prefer cuda, then mps, then cpu
   device: auto
-  logdir: logs
+  logdir: runs
 
 # Any other user fields are accepted and ignored by default

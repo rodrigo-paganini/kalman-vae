@@ -19,7 +19,13 @@ class Encoder(nn.Module):
         in_channels = config.img_channels
         for out_channels in config.encoder_channels:
             layers.extend([
-                nn.Conv2d(in_channels, out_channels, kernel_size=3, stride=2, padding=1),
+                nn.Conv2d(
+                    in_channels,
+                    out_channels,
+                    kernel_size=self.config.encoder_kernel_size,
+                    stride=self.config.encoder_stride,
+                    padding=self.config.encoder_padding,
+                ),
                 nn.ReLU()
             ])
             in_channels = out_channels
@@ -68,23 +74,29 @@ class Decoder(nn.Module):
         # Linear layer to expand latent to initial feature maps
         self.fc = nn.Linear(config.a_dim, 
                            self.init_channels * self.init_size * self.init_size)
-        
-        # Build deconvolutional layers
+        # Build upsampling stack using Sub-Pixel (PixelShuffle) layers.
+        # Each upsampling step increases spatial size by factor r (2) via
+        # Conv2d -> PixelShuffle(r). We perform one upsample per entry in
+        # `decoder_channels` so that init_size * (2**len(decoder_channels)) == img_size.
         layers = []
         channels = config.decoder_channels.copy()
+        r = 2  # upsampling factor per step
+
+        # For each intermediate upsampling step: produce channels[i+1] * r^2
+        # features and then rearrange with PixelShuffle to get channels[i+1]
         for i in range(len(channels) - 1):
+            in_c = channels[i]
+            out_c = channels[i+1]
             layers.extend([
-                nn.ConvTranspose2d(channels[i], channels[i+1], 
-                                  kernel_size=4, stride=2, padding=1),
+                nn.Conv2d(in_c, out_c * (r * r), kernel_size=3, padding=1),
+                nn.PixelShuffle(r),
                 nn.ReLU()
             ])
-        
-        # Final layer to output image
-        layers.append(
-            nn.ConvTranspose2d(channels[-1], config.img_channels,
-                              kernel_size=4, stride=2, padding=1)
-        )
-        
+
+        # Final conv to map to image channels and upsample one last time
+        layers.append(nn.Conv2d(channels[-1], config.img_channels * (r * r), kernel_size=3, padding=1))
+        layers.append(nn.PixelShuffle(r))
+
         self.deconv_layers = nn.Sequential(*layers)
     
     def forward(self, a: torch.Tensor) -> torch.Tensor:
