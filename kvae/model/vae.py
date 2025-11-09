@@ -37,7 +37,10 @@ class Encoder(nn.Module):
         
         # Output layers for mean and log variance
         self.fc_mu = nn.Linear(self.flat_size, config.a_dim)
-        self.fc_logvar = nn.Linear(self.flat_size, config.a_dim)
+        self.fc_var = nn.Sequential(
+            nn.Linear(self.flat_size, config.a_dim),
+            nn.Sigmoid()
+        )
     
     def _get_flat_size(self):
         """Calculate size after convolutions"""
@@ -51,13 +54,13 @@ class Encoder(nn.Module):
         Args:
             x: Input images [batch, channels, height, width]
         Returns:
-            mu, logvar: Mean and log variance of q(a|x)
+            mu, var: Mean and log variance of q(a|x)
         """
         h = self.conv_layers(x)
         h = h.view(h.size(0), -1)
         mu = self.fc_mu(h)
-        logvar = self.fc_logvar(h)
-        return mu, logvar
+        var = self.fc_var(h)
+        return mu, self.config.noise_emission * var
 
 
 class Decoder(nn.Module):

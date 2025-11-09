@@ -25,6 +25,7 @@ class KVAEConfig:
     decoder_kernel_size: int = 3
     decoder_stride: int = 2
     decoder_padding: int = 1
+    noise_emission: float = 0.03
 
     # Dynamics network
     dynamics_hidden_dim: int = 64

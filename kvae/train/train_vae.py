@@ -52,8 +52,8 @@ class VAELit(pl.LightningModule):
         self._val_loss_sum = 0.0
         self._val_loss_count = 0
 
-    def reparameterize(self, mu: torch.Tensor, logvar: torch.Tensor) -> torch.Tensor:
-        std = torch.exp(0.5 * logvar)
+    def reparameterize(self, mu: torch.Tensor, var: torch.Tensor) -> torch.Tensor:
+        std = torch.sqrt(var)
         eps = torch.randn_like(std)
         return mu + eps * std
 
@@ -61,14 +61,15 @@ class VAELit(pl.LightningModule):
         # x: [B, T, C, H, W]
         B, T = x.shape[:2]
         x_flat = x.view(-1, *x.shape[2:])  # [B*T, C, H, W]
-        mu, logvar = self.encoder(x_flat)
-        a = self.reparameterize(mu, logvar)
-        x_recon_flat = self.decoder(a)
+        mu, var = self.encoder(x_flat)
+        a = self.reparameterize(mu, var)
+        x_recon_mu = self.decoder(a)
+        x_recon_flat = self.reparameterize(x_recon_mu, torch.tensor(self.cfg.noise_emission))
         x_recon = x_recon_flat.view(B, T, *x_recon_flat.shape[1:])
-        # reshape mus/logvars
+        # reshape mus/vars
         mu = mu.view(B, T, -1)
-        logvar = logvar.view(B, T, -1)
-        return {'x_recon': x_recon, 'a_mu': mu, 'a_logvar': logvar}
+        var = var.view(B, T, -1)
+        return {'x_recon': x_recon, 'a_mu': mu, 'a_var': var}
 
     def training_step(self, batch, batch_idx):
         # support dicts and simple TensorDataset
@@ -93,10 +94,10 @@ class VAELit(pl.LightningModule):
             recon = recon * float(self.cfg.recon_weight)
 
         mu = out['a_mu']
-        logvar = out['a_logvar']
-        # KL divergence between q(a|x)=N(mu,diag(exp(logvar))) and p(a)=N(0,I)
+        var = out['a_var']
+        # KL divergence between q(a|x)=N(mu,diag(exp(var))) and p(a)=N(0,I)
         # sum over time and latent dims, then average over batch
-        kl = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp())
+        kl = -0.5 * torch.sum((1 + torch.log(var) - mu.pow(2) - var))
         kl = kl / x.shape[0]
 
         # ELBO (we minimize the negative ELBO): recon + KL
@@ -129,8 +130,8 @@ class VAELit(pl.LightningModule):
         if getattr(self.cfg, 'recon_weight', None) is not None:
             recon = recon * float(self.cfg.recon_weight)
         mu = out['a_mu']
-        logvar = out['a_logvar']
-        kl = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp())
+        a_var = out['a_var']
+        kl = -0.5 * torch.sum(1 + torch.log(a_var) - mu.pow(2) - a_var)
         kl = kl / x.shape[0]
         total = recon + kl
         self.log('val/total_loss', total, on_step=False, on_epoch=True, prog_bar=True)
