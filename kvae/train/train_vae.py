@@ -3,6 +3,8 @@
 This mirrors the style of `train_lightning.py` but trains only the
 Encoder/Decoder (VAE) using the same `KVAEConfig` for compatibility.
 
+It is mostly intended for testing the VAE capabilities, but is not to be included in the main training pipeline.
+
 Usage:
     python -m kvae.train.train_vae --max-epochs 10 --batch-size 32
 
@@ -15,6 +17,7 @@ import yaml
 import os
 import shutil
 from typing import Optional, Callable
+from dataclasses import dataclass
 
 import torch
 import pytorch_lightning as pl
@@ -36,8 +39,8 @@ Theoretical
 
 Code
 - Refactor to create a VAE Torch class, train_vae should only wrap it with Lightning.
-- Proper consideration of train config files
 - Improve declaration of loss functions
+- Tests
 """
 
 const_log_pdf = torch.tensor(- 0.5) * torch.log(torch.tensor(2) * torch.pi)
@@ -70,6 +73,17 @@ def vae_loss(out, x, config):
     total = recon + kl
 
     return total, recon, kl
+
+@dataclass
+class TrainingConfig:
+    max_epochs: int = 10
+    gpus: int = 1
+    lr: float = 1e-3
+    batch_size: int = 32
+    ckpt_every: int = 5
+    device: str = 'auto'
+    logdir: str = 'runs'
+
 
 class VAELit(pl.LightningModule):
     """LightningModule wrapper for a simple VAE (Encoder + Decoder).
@@ -297,15 +311,10 @@ class TransformDataset(torch.utils.data.Dataset):
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument('--max-epochs', type=int, default=20)
-    p.add_argument('--batch-size', type=int, default=16)
-    p.add_argument('--lr', type=float, default=1e-3)
-    p.add_argument('--logdir', type=str, default='runs')
     p.add_argument('--config', type=str, default='kvae/train/config.yaml', help='Path to YAML/JSON config file')
-    p.add_argument('--num-seq', type=int, default=200)
-    p.add_argument('--T', type=int, default=10)
-    p.add_argument('--gpus', type=int, default=0)
-    p.add_argument('--ckpt-every', type=int, default=5)
+    # VAE training specific args
+    p.add_argument('--T', type=int, default=10, help='Length of each sequence in the (toy) dataset.')
+    p.add_argument('--num-seq', type=int, default=200, help='Number of sequences in the (toy) dataset.')
     args = p.parse_args()
 
     config_path = args.config
@@ -317,6 +326,7 @@ def main():
             else:
                 config = json.load(f)
 
+    train_cfg = TrainingConfig(**(config.get('training', {}) if config else {}))
     cfg = KVAEConfig()
 
     dataset_cfg = config.get('dataset') if config else None
@@ -343,15 +353,25 @@ def main():
 
     transform_fn = build_transform(transforms_cfg)
 
-    lit = VAELit(cfg, lr=args.lr)
-    dm = VAEDataModule(cfg, batch_size=args.batch_size, num_seq=args.num_seq, T=args.T,
-                       dataset_type=ds_type, dataset_path=ds_path, dataset_kwargs=ds_kwargs,
-                       transform_fn=transform_fn)
+    lit = VAELit(
+        cfg,
+        lr=train_cfg.lr
+    )
+    dm = VAEDataModule(
+        cfg,
+        batch_size=train_cfg.batch_size,
+        num_seq=args.num_seq,
+        T=args.T,
+        dataset_type=ds_type,
+        dataset_path=ds_path,
+        dataset_kwargs=ds_kwargs,
+        transform_fn=transform_fn
+    )
 
     # Create a timestamped run folder so each experiment is isolated: <logdir>/<timestamp>/
     import datetime
     ts = datetime.datetime.now().strftime('%Y%m%d-%H%M%S')
-    ckpt_root = os.path.join(args.logdir, ts)
+    ckpt_root = os.path.join(train_cfg.logdir, ts)
     os.makedirs(ckpt_root, exist_ok=True)
 
     # Prepare a dedicated checkpoints subfolder inside the run folder
@@ -402,7 +422,7 @@ def main():
     ckpt_callback_periodic = ModelCheckpoint(
         dirpath=ckpt_dir,
         filename='vae-ckpt-{epoch}',
-        every_n_epochs=args.ckpt_every,
+        every_n_epochs=train_cfg.ckpt_every,
         save_top_k=-1,
     )
 
@@ -410,7 +430,7 @@ def main():
     device_pref = training_cfg.get('device', 'auto')
 
     trainer_kwargs = dict(
-        max_epochs=args.max_epochs,
+        max_epochs=train_cfg.max_epochs,
         logger=logger,
         callbacks=[ckpt_callback_best, ckpt_callback_periodic],
         log_every_n_steps=10,
@@ -421,8 +441,8 @@ def main():
         if pref == 'cpu':
             trainer_kwargs.update({'accelerator': 'cpu', 'devices': 1})
             return trainer_kwargs
-        if pref in ('cuda', 'gpu') or (pref == 'auto' and torch.cuda.is_available() and args.gpus > 0):
-            devices = args.gpus if args.gpus > 0 else 1
+        if pref in ('cuda', 'gpu') or (pref == 'auto' and torch.cuda.is_available() and train_cfg.gpus > 0):
+            devices = train_cfg.gpus if train_cfg.gpus > 0 else 1
             trainer_kwargs.update({'accelerator': 'gpu', 'devices': devices})
             return trainer_kwargs
         try:
