@@ -6,7 +6,7 @@ Encoder/Decoder (VAE) using the same `KVAEConfig` for compatibility.
 It is mostly intended for testing the VAE capabilities, but is not to be included in the main training pipeline.
 
 Usage:
-    python -m kvae.train.train_vae --max-epochs 10 --batch-size 32
+    python -m kvae.train.train_vae
 
 """
 from __future__ import annotations
