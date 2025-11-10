@@ -29,50 +29,7 @@ from kvae.model.config import KVAEConfig
 from kvae.model.vae import Encoder, Decoder
 from kvae.data_loading.dataloader import make_toy_dataset
 from kvae.data_loading.pymunk_dataset import PymunkNPZDataset
-
-
-"""
-TODO
-Theoretical
-- Gaussian implementation for more generality. Bernoulli is missing.
-- Time-dependency: check if loading / loss calculation needs to change.
-
-Code
-- Refactor to create a VAE Torch class, train_vae should only wrap it with Lightning.
-- Improve declaration of loss functions
-- Tests
-"""
-
-const_log_pdf = torch.tensor(- 0.5) * torch.log(torch.tensor(2) * torch.pi)
-
-
-def log_gaussian(x, mean, var):
-    return const_log_pdf - torch.log(var) / 2 - torch.square(x - mean) / (2 * var)
-
-def log_likelihood(out, x, config):
-    x_mu, x_var = out['x_recon_mu'], out['x_recon_var']
-    a, a_mu, a_var = out['a_vae'], out['a_mu'], out['a_var']
-
-    log_lik = log_gaussian(x, x_mu, x_var)
-
-    log_lik = log_lik.sum((1,2,3,4))
-    log_px_given_a = log_lik.mean()
-
-    log_qa_given_x = torch.sum(log_gaussian(a, a_mu, a_var), (1,2))
-    log_qa_given_x = log_qa_given_x.mean()
-
-    return log_px_given_a, log_qa_given_x
-
-def vae_loss(out, x, config):
-    log_px_given_a, log_qa_given_x = log_likelihood(out, x, config)
-    recon = -log_px_given_a
-    kl = log_qa_given_x
-
-    if getattr(config, 'scale_reconstruction', None) is not None:
-        recon = recon * float(config.scale_reconstruction)
-    total = recon + kl
-
-    return total, recon, kl
+from kvae.utils.losses import vae_loss
 
 @dataclass
 class TrainingConfig:
@@ -150,7 +107,10 @@ class VAELit(pl.LightningModule):
         out = self.forward(x)
 
         # Calculate losses
-        total, recon, kl = vae_loss(out, x, self.cfg)
+        x_mu, x_var = out['x_recon_mu'], out['x_recon_var']
+        a, a_mu, a_var = out['a_vae'], out['a_mu'], out['a_var']
+
+        total, recon, kl = vae_loss(x, x_mu, x_var, a, a_mu, a_var, scale_reconstruction=self.cfg.scale_reconstruction)
         self.log('train/total_loss', total, on_step=True, on_epoch=True, prog_bar=True)
         self.log('train/recon_loss', recon, on_step=True, on_epoch=True)
         self.log('train/kl_loss', kl, on_step=True, on_epoch=True)
@@ -175,7 +135,10 @@ class VAELit(pl.LightningModule):
         out = self.forward(x)
 
         # Calculate losses
-        total, recon, kl = vae_loss(out, x, self.cfg)
+        x_mu, x_var = out['x_recon_mu'], out['x_recon_var']
+        a, a_mu, a_var = out['a_vae'], out['a_mu'], out['a_var']
+
+        total, recon, kl = vae_loss(x, x_mu, x_var, a, a_mu, a_var, scale_reconstruction=self.cfg.scale_reconstruction)
         self.log('val/total_loss', total, on_step=False, on_epoch=True, prog_bar=True)
         self.log('val/recon_loss', recon, on_step=False, on_epoch=True)
         self.log('val/kl_loss', kl, on_step=False, on_epoch=True)
