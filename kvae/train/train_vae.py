@@ -28,6 +28,18 @@ from kvae.data_loading.dataloader import make_toy_dataset
 from kvae.data_loading.pymunk_dataset import PymunkNPZDataset
 
 
+"""
+TODO
+Theoretical
+- Gaussian implementation for more generality. Bernoulli is missing.
+- Time-dependency: check if loading / loss calculation needs to change.
+
+Code
+- Refactor to create a VAE Torch class, train_vae should only wrap it with Lightning.
+- Proper consideration of train config files
+- Improve declaration of loss functions
+"""
+
 const_log_pdf = torch.tensor(- 0.5) * torch.log(torch.tensor(2) * torch.pi)
 
 
@@ -285,7 +297,7 @@ class TransformDataset(torch.utils.data.Dataset):
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument('--max-epochs', type=int, default=10)
+    p.add_argument('--max-epochs', type=int, default=20)
     p.add_argument('--batch-size', type=int, default=16)
     p.add_argument('--lr', type=float, default=1e-3)
     p.add_argument('--logdir', type=str, default='runs')
