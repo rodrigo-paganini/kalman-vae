@@ -28,6 +28,37 @@ from kvae.data_loading.dataloader import make_toy_dataset
 from kvae.data_loading.pymunk_dataset import PymunkNPZDataset
 
 
+const_log_pdf = torch.tensor(- 0.5) * torch.log(torch.tensor(2) * torch.pi)
+
+
+def log_gaussian(x, mean, var):
+    return const_log_pdf - torch.log(var) / 2 - torch.square(x - mean) / (2 * var)
+
+def log_likelihood(out, x, config):
+    x_mu, x_var = out['x_recon_mu'], out['x_recon_var']
+    a, a_mu, a_var = out['a_vae'], out['a_mu'], out['a_var']
+
+    log_lik = log_gaussian(x, x_mu, x_var)
+
+    log_lik = log_lik.sum((1,2,3,4))
+    log_px_given_a = log_lik.mean()
+
+    log_qa_given_x = torch.sum(log_gaussian(a, a_mu, a_var), (1,2))
+    log_qa_given_x = log_qa_given_x.mean()
+
+    return log_px_given_a, log_qa_given_x
+
+def vae_loss(out, x, config):
+    log_px_given_a, log_qa_given_x = log_likelihood(out, x, config)
+    recon = -log_px_given_a
+    kl = log_qa_given_x
+
+    if getattr(config, 'scale_reconstruction', None) is not None:
+        recon = recon * float(config.scale_reconstruction)
+    total = recon + kl
+
+    return total, recon, kl
+
 class VAELit(pl.LightningModule):
     """LightningModule wrapper for a simple VAE (Encoder + Decoder).
 
@@ -64,12 +95,22 @@ class VAELit(pl.LightningModule):
         mu, var = self.encoder(x_flat)
         a = self.reparameterize(mu, var)
         x_recon_mu = self.decoder(a)
-        x_recon_flat = self.reparameterize(x_recon_mu, torch.tensor(self.cfg.noise_emission))
+        x_recon_var = torch.tensor(self.cfg.noise_pixel_var, device=x.device)
+        x_recon_flat = self.reparameterize(x_recon_mu, x_recon_var)
         x_recon = x_recon_flat.view(B, T, *x_recon_flat.shape[1:])
+        x_recon_mu = x_recon_mu.view(B, T, *x_recon_mu.shape[1:])
         # reshape mus/vars
         mu = mu.view(B, T, -1)
         var = var.view(B, T, -1)
-        return {'x_recon': x_recon, 'a_mu': mu, 'a_var': var}
+        a = a.view(B, T, -1)
+        return {
+            'x_recon': x_recon,
+            'x_recon_mu': x_recon_mu,
+            'x_recon_var': x_recon_var,
+            'a_vae': a,
+            'a_mu': mu,
+            'a_var': var
+        }
 
     def training_step(self, batch, batch_idx):
         # support dicts and simple TensorDataset
@@ -82,26 +123,8 @@ class VAELit(pl.LightningModule):
 
         out = self.forward(x)
 
-        # Reconstruction term: negative log-likelihood under an isotropic
-        # Gaussian p(x|a) = N(x_recon, I). Up to an additive constant,
-        # -log p(x|a) = 0.5 * ||x - x_recon||^2. We sum over all pixels and
-        # time-steps then average over the batch so the loss is on a per-sample
-        # scale (consistent with the KL below).
-        mse_sum = torch.nn.functional.mse_loss(out['x_recon'], x, reduction='sum')
-        recon = 0.5 * mse_sum / x.shape[0]
-        # optional scaling term preserved from original code (keeps compatibility)
-        if getattr(self.cfg, 'recon_weight', None) is not None:
-            recon = recon * float(self.cfg.recon_weight)
-
-        mu = out['a_mu']
-        var = out['a_var']
-        # KL divergence between q(a|x)=N(mu,diag(exp(var))) and p(a)=N(0,I)
-        # sum over time and latent dims, then average over batch
-        kl = -0.5 * torch.sum((1 + torch.log(var) - mu.pow(2) - var))
-        kl = kl / x.shape[0]
-
-        # ELBO (we minimize the negative ELBO): recon + KL
-        total = recon + kl
+        # Calculate losses
+        total, recon, kl = vae_loss(out, x, self.cfg)
         self.log('train/total_loss', total, on_step=True, on_epoch=True, prog_bar=True)
         self.log('train/recon_loss', recon, on_step=True, on_epoch=True)
         self.log('train/kl_loss', kl, on_step=True, on_epoch=True)
@@ -124,17 +147,12 @@ class VAELit(pl.LightningModule):
             x = batch
 
         out = self.forward(x)
-        mse_sum = torch.nn.functional.mse_loss(out['x_recon'], x, reduction='sum')
-        # note: use the same convention as training: 0.5 * sum-squared per sample
-        recon = 0.5 * torch.nn.functional.mse_loss(out['x_recon'], x, reduction='sum') / x.shape[0]
-        if getattr(self.cfg, 'recon_weight', None) is not None:
-            recon = recon * float(self.cfg.recon_weight)
-        mu = out['a_mu']
-        a_var = out['a_var']
-        kl = -0.5 * torch.sum(1 + torch.log(a_var) - mu.pow(2) - a_var)
-        kl = kl / x.shape[0]
-        total = recon + kl
+
+        # Calculate losses
+        total, recon, kl = vae_loss(out, x, self.cfg)
         self.log('val/total_loss', total, on_step=False, on_epoch=True, prog_bar=True)
+        self.log('val/recon_loss', recon, on_step=False, on_epoch=True)
+        self.log('val/kl_loss', kl, on_step=False, on_epoch=True)
 
         # keep first batch's first sequence for image logging at epoch end
         if batch_idx == 0:
