@@ -288,7 +288,7 @@ def main():
     import datetime
     ts = datetime.datetime.now().strftime('%Y%m%d-%H%M%S')
     ckpt_root = os.path.join(args.logdir, ts)
-    os.makedirs(ckpt_root, exist_ok=True)
+    os.makedirs(ckpt_root)
 
     # Prepare a dedicated checkpoints subfolder inside the run folder
     ckpt_dir = os.path.join(ckpt_root, 'checkpoints')
