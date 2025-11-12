@@ -1,4 +1,5 @@
 import numpy as np
+import os
 import torch.nn as nn
 
 from typing import Tuple
@@ -113,3 +114,124 @@ class Decoder(nn.Module):
         h = h.view(h.size(0), self.init_channels, self.init_size, self.init_size)
         x_recon = self.deconv_layers(h)
         return x_recon
+
+
+class VAE(nn.Module):
+    """High-level VAE wrapper that composes Encoder + Decoder.
+
+    Provides convenience methods for encoding, sampling and decoding so the
+    training code and utilities can rely on a single class.
+    """
+
+    def __init__(self, config: KVAEConfig):
+        super().__init__()
+        self.config = config
+        self.encoder = Encoder(config)
+        self.decoder = Decoder(config)
+
+    def encode(self, x: torch.Tensor):
+        """Encode images.
+
+        Args:
+            x: [N, C, H, W]
+        Returns:
+            mu, var: [N, a_dim]
+        """
+        return self.encoder(x)
+
+    def reparameterize(self, mu: torch.Tensor, var: torch.Tensor):
+        std = torch.sqrt(var)
+        eps = torch.randn_like(std)
+        return mu + eps * std
+
+    def decode(self, a: torch.Tensor):
+        """Decode latents to image means.
+
+        Args:
+            a: [N, a_dim]
+        Returns:
+            x_recon_mu: [N, C, H, W]
+        """
+        return self.decoder(a)
+
+    def forward(self, x: torch.Tensor) -> dict:
+        """Run full VAE on input sequences.
+
+        Input:
+            x: [B, T, C, H, W]
+        Returns dict with keys:
+            'x_recon', 'x_recon_mu', 'x_recon_var', 'a_vae', 'a_mu', 'a_var'
+        """
+        B, T = x.shape[:2]
+        x_flat = x.view(-1, *x.shape[2:])  # [B*T, C, H, W]
+        mu, var = self.encode(x_flat)
+        a = self.reparameterize(mu, var)
+        x_recon_mu = self.decode(a)
+
+        # scalar reconstruction variance from config
+        x_recon_var = torch.tensor(self.config.noise_pixel_var, device=x.device, dtype=x_recon_mu.dtype)
+
+        # reshape back
+        x_recon = x_recon_mu.view(B, T, *x_recon_mu.shape[1:])
+        x_recon_mu = x_recon_mu.view(B, T, *x_recon_mu.shape[1:])
+        mu = mu.view(B, T, -1)
+        var = var.view(B, T, -1)
+        a = a.view(B, T, -1)
+
+        return {
+            'x_recon': x_recon,
+            'x_recon_mu': x_recon_mu,
+            'x_recon_var': x_recon_var,
+            'a_vae': a,
+            'a_mu': mu,
+            'a_var': var,
+        }
+
+    def sample_from_prior(self, n: int = 1, device: str | None = None) -> torch.Tensor:
+        """Sample images by drawing latents from the prior N(0,I) and decoding.
+
+        Returns:
+            samples: [n, C, H, W]
+        """
+        device = device or next(self.parameters()).device
+        a = torch.randn(n, self.config.a_dim, device=device)
+        x_mu = self.decode(a)
+        return x_mu
+
+    @classmethod
+    def load_from_checkpoint(cls, checkpoint_path: str, config: KVAEConfig | None = None, device: str = 'cpu'):
+        """Construct a VAE instance and load encoder/decoder weights from a checkpoint.
+
+        Accepts Lightning-style checkpoints (dict with 'state_dict') or plain state_dict files.
+        If `config` is None the default `KVAEConfig()` will be used; for exact parity
+        you should pass the same config used during training.
+        """
+        if config is None:
+            config = KVAEConfig()
+        vae = cls(config)
+
+        if not os.path.exists(checkpoint_path):
+            raise FileNotFoundError(checkpoint_path)
+
+        ckpt = torch.load(checkpoint_path, map_location=device)
+        if isinstance(ckpt, dict) and 'state_dict' in ckpt:
+            state_dict = ckpt['state_dict']
+        else:
+            state_dict = ckpt
+
+        # pull encoder/decoder keys (support both 'encoder.' and 'model.encoder.' prefixes)
+        enc = {k.split('encoder.',1)[-1]: v for k, v in state_dict.items() if 'encoder.' in k}
+        dec = {k.split('decoder.',1)[-1]: v for k, v in state_dict.items() if 'decoder.' in k}
+
+        if not enc or not dec:
+            # fallback: maybe checkpoints saved top-level keys for encoder/decoder
+            enc = {k.replace('encoder.', ''): v for k, v in state_dict.items() if k.startswith('encoder.')}
+            dec = {k.replace('decoder.', ''): v for k, v in state_dict.items() if k.startswith('decoder.')}
+
+        if enc:
+            vae.encoder.load_state_dict(enc)
+        if dec:
+            vae.decoder.load_state_dict(dec)
+
+        vae.to(device)
+        return vae

@@ -26,7 +26,7 @@ from pytorch_lightning.callbacks import ModelCheckpoint
 from torch.utils.data import DataLoader, random_split
 
 from kvae.model.config import KVAEConfig
-from kvae.model.vae import Encoder, Decoder
+from kvae.model.vae import VAE
 from kvae.data_loading.dataloader import make_toy_dataset
 from kvae.data_loading.pymunk_dataset import PymunkNPZDataset
 from kvae.utils.losses import vae_loss
@@ -53,8 +53,7 @@ class VAELit(pl.LightningModule):
         super().__init__()
         self.save_hyperparameters({'lr': lr})
         self.cfg = cfg
-        self.encoder = Encoder(cfg)
-        self.decoder = Decoder(cfg)
+        self.model = VAE(cfg)
         self.lr = lr
         # placeholders for validation-image logging
         self._val_orig = None
@@ -66,34 +65,7 @@ class VAELit(pl.LightningModule):
         self._val_loss_sum = 0.0
         self._val_loss_count = 0
 
-    def reparameterize(self, mu: torch.Tensor, var: torch.Tensor) -> torch.Tensor:
-        std = torch.sqrt(var)
-        eps = torch.randn_like(std)
-        return mu + eps * std
-
-    def forward(self, x: torch.Tensor) -> dict:
-        # x: [B, T, C, H, W]
-        B, T = x.shape[:2]
-        x_flat = x.view(-1, *x.shape[2:])  # [B*T, C, H, W]
-        mu, var = self.encoder(x_flat)
-        a = self.reparameterize(mu, var)
-        x_recon_mu = self.decoder(a)
-        x_recon_var = torch.tensor(self.cfg.noise_pixel_var, device=x.device)
-        x_recon_flat = self.reparameterize(x_recon_mu, x_recon_var)
-        x_recon = x_recon_flat.view(B, T, *x_recon_flat.shape[1:])
-        x_recon_mu = x_recon_mu.view(B, T, *x_recon_mu.shape[1:])
-        # reshape mus/vars
-        mu = mu.view(B, T, -1)
-        var = var.view(B, T, -1)
-        a = a.view(B, T, -1)
-        return {
-            'x_recon': x_recon,
-            'x_recon_mu': x_recon_mu,
-            'x_recon_var': x_recon_var,
-            'a_vae': a,
-            'a_mu': mu,
-            'a_var': var
-        }
+    # Forwarding is handled by the VAE wrapper. Use self.model(x) in steps.
 
     def training_step(self, batch, batch_idx):
         # support dicts and simple TensorDataset
@@ -104,7 +76,7 @@ class VAELit(pl.LightningModule):
         else:
             x = batch
 
-        out = self.forward(x)
+        out = self.model(x)
 
         # Calculate losses
         x_mu, x_var = out['x_recon_mu'], out['x_recon_var']
@@ -132,7 +104,7 @@ class VAELit(pl.LightningModule):
         else:
             x = batch
 
-        out = self.forward(x)
+        out = self.model(x)
 
         # Calculate losses
         x_mu, x_var = out['x_recon_mu'], out['x_recon_var']
@@ -214,7 +186,7 @@ class VAELit(pl.LightningModule):
         self._val_recon = None
 
     def configure_optimizers(self):
-        opt = torch.optim.Adam(list(self.encoder.parameters()) + list(self.decoder.parameters()), lr=self.lr)
+        opt = torch.optim.Adam(self.model.parameters(), lr=self.lr)
         return opt
 
 
