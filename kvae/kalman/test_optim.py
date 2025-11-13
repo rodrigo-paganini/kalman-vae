@@ -16,7 +16,7 @@ def simulate_rocket_batch(B, T, dt, std_dyn=2.0, std_meas=4.0):
 
     X = np.zeros((B, T, 2))  # [pos, vel]
     Y = np.zeros((B, T, 1))  # altitude
-    U = np.zeros((B, T, 1))  # control = a_meas + g
+    U = np.zeros((B, T, 1))  # control
 
     for b in range(B):
         thrust = rng.uniform(15.0, 25.0)   # m/s^2
@@ -45,20 +45,21 @@ def simulate_rocket_batch(B, T, dt, std_dyn=2.0, std_meas=4.0):
 
     return (torch.tensor(Y, dtype=torch.float32),
             torch.tensor(U, dtype=torch.float32),
-            torch.tensor(X, dtype=torch.float32)) 
+            torch.tensor(X, dtype=torch.float32))
 
 # Parameters
-K = 1 
+K = 1
 dt = 0.1
 n_batch = 5000
 T = 100
 std_dyn = 0.5     
 std_obs = 4.0     
 
+# Simulate batch data [B,T,1], [B,T,1], [B,T,2]
 Y, U, X = simulate_rocket_batch(n_batch, T, dt, std_dyn,std_obs)
 
 # Show one sample
-sample = 100
+sample = 0
 x = X[sample,:,0].numpy()
 z_meas = Y[sample,:,0].numpy()
 t = np.arange(T)*dt
@@ -78,9 +79,12 @@ B_true = torch.tensor([[0.5*dt*dt],[dt]], dtype=torch.float32).repeat(K,1,1)
 C_true = torch.tensor([[1., 0.]], dtype=torch.float32).repeat(K,1,1)
 
 # Initial random guesses
-A0 = torch.randn_like(A_true).repeat(K,1,1)
-B0 = torch.randn_like(B_true).repeat(K,1,1)
-C0 = torch.randn_like(C_true).repeat(K,1,1)
+A0 = torch.eye(2, dtype=torch.float32) + 0.1 * torch.randn(2, 2)
+A0 = A0.repeat(K, 1, 1)
+B0 = 0.1 * torch.randn(2, 1, dtype=torch.float32)
+B0 = B0.repeat(K, 1, 1)
+C0 = torch.tensor([[1., 0.]], dtype=torch.float32) + 0.1 * torch.randn(1, 2)
+C0 = C0.repeat(K, 1, 1)
 
 mu0    = torch.zeros(2)
 Sigma0 = torch.diag(torch.tensor([1., 1.], dtype=torch.float32))
@@ -100,7 +104,7 @@ print(f"ELBO: {elbo.item():.2f}")
 # Optimizer
 opt = torch.optim.Adam(dyn_params.parameters(), lr=1e-2, weight_decay=0.0)
 kf.train()
-n_epochs = 200
+n_epochs = 120
 losses = []
 
 for epoch in range(1, n_epochs + 1):
@@ -112,13 +116,6 @@ for epoch in range(1, n_epochs + 1):
     mus_smooth, Sigmas_smooth, A_list, B_list, C_list = kf.smooth(Y, U)            # [B,T,n], [B,T,n,n]
     elbo = kf.elbo(mus_smooth, Sigmas_smooth, Y, U, A_list, B_list, C_list)        # scalar (per-frame normalized)
     loss = -elbo                                           # maximize ELBO
-
-    # Alignment loss
-    Z = mus_smooth.detach().reshape(-1, dyn_params.n)     
-    X_true = X.reshape(-1, dyn_params.n)
-    S = torch.linalg.lstsq(Z, X_true).solution   
-    align_loss = torch.mean((mus_smooth.reshape(-1, dyn_params.n) @ S - X_true)**2)
-    loss = -elbo + 1e-2 * align_loss  
 
     # Backward + step
     loss.backward()
@@ -132,19 +129,59 @@ for epoch in range(1, n_epochs + 1):
 def rel_err(est, true):
     return (torch.linalg.norm(est - true) / torch.linalg.norm(true)).item()
 
-# TODO: not matching, differences in learned base
-print("\nLearned parameters vs ground truth:")
-print("A (learned):\n", dyn_params.A.detach().cpu().numpy())
-print("A (true):\n", A_true.detach().cpu().numpy())
-print(f"rel ||Â-A|| / ||A|| = {rel_err(dyn_params.A, A_true):.4e}")
 
-print("\nB (learned):\n", dyn_params.B.detach().cpu().numpy())
-print("B (true):\n", B_true.detach().cpu().numpy())
-print(f"rel ||B̂-B|| / ||B|| = {rel_err(dyn_params.B, B_true):.4e}")
-print("\nC (learned):\n", dyn_params.C.detach().cpu().numpy())
+# Test after training
+dyn_params.reset_state()
+sample = 10
 
-print("C (true):\n", C_true.detach().cpu().numpy())
-print(f"rel ||Ĉ-C|| / ||C|| = {rel_err(dyn_params.C, C_true):.4e}")
+x_ref_pos = X[sample, :, 0].cpu().numpy()
+x_ref_vel = X[sample, :, 1].cpu().numpy()
+z_meas    = Y[sample, :, 0].cpu().numpy()
+
+mus_filt, Sigmas_filt, mus_pred, Sigmas_pred, A_list, B_list, C_list = kf.filter(Y, U)
+mus_smooth, Sigmas_smooth, A_list, B_list, C_list = kf.smooth(Y, U)
+elbo = kf.elbo(mus_smooth, Sigmas_smooth, Y, U, A_list, B_list, C_list)
+print(f"\nAfter training ELBO: {elbo.item():.2f}")
+
+# Evaluate in measurement space: y_hat = C_t @ mu
+with torch.no_grad():
+    mu_f = mus_filt[sample]        
+    P_f  = Sigmas_filt[sample]     
+    mu_s = mus_smooth[sample]      
+    P_s  = Sigmas_smooth[sample]   
+    C_t  = C_list[sample]          
+
+    # Predicted measurement mean over time
+    y_mean_f = (C_t @ mu_f).squeeze(-1)      
+    y_mean_s = (C_t @ mu_s).squeeze(-1)      
+
+    # Predicted measurement std (channel 0) via C P C^T
+    c0 = C_t[:, 0, :]                        
+    var_y_f = torch.einsum('ti,tij,tj->t', c0, P_f, c0)  
+    var_y_s = torch.einsum('ti,tij,tj->t', c0, P_s, c0)  
+
+    y_mean_f_np = y_mean_f.detach().cpu().numpy()
+    y_mean_s_np = y_mean_s.detach().cpu().numpy()
+    pos_std_f   = var_y_f.clamp_min(0).sqrt().cpu().numpy()
+    pos_std_s   = var_y_s.clamp_min(0).sqrt().cpu().numpy()
+
+# Altitude plot 
+plt.figure()
+plt.plot(t, x_ref_pos, label="Reference", linestyle="--", color="black")
+plt.scatter(t, z_meas, label="Observations", marker="x", alpha=0.5)
+plt.plot(t, y_mean_f_np[:, 0], label="KF predicted meas", linewidth=2, color="orange")
+plt.fill_between(t,
+                 y_mean_f_np[:, 0] - pos_std_f,
+                 y_mean_f_np[:, 0] + pos_std_f,
+                 alpha=0.2, label="KF ±1std", color="orange")
+plt.plot(t, y_mean_s_np[:, 0], label="RTS predicted meas", linewidth=2, color="red")
+plt.fill_between(t,
+                 y_mean_s_np[:, 0] - pos_std_s,
+                 y_mean_s_np[:, 0] + pos_std_s,
+                 alpha=0.2, label="RTS ±1std", color="red")
+plt.xlabel("Time [s]"); plt.ylabel("Altitude [m]")
+plt.title("Altitude: reference vs predicted measurement (KF/RTS)")
+plt.legend(); plt.grid(True); plt.show()
 
 print("Debug")
 
