@@ -1,4 +1,5 @@
 import torch
+from torch.distributions import MultivariateNormal
 import numpy as np
 from kalman_filter import KalmanFilter, DynamicsParameter
 import matplotlib.pyplot as plt
@@ -104,7 +105,7 @@ print(f"ELBO: {elbo.item():.2f}")
 # Optimizer
 opt = torch.optim.Adam(dyn_params.parameters(), lr=1e-2, weight_decay=0.0)
 kf.train()
-n_epochs = 120
+n_epochs = 100
 losses = []
 
 for epoch in range(1, n_epochs + 1):
@@ -183,7 +184,121 @@ plt.xlabel("Time [s]"); plt.ylabel("Altitude [m]")
 plt.title("Altitude: reference vs predicted measurement (KF/RTS)")
 plt.legend(); plt.grid(True); plt.show()
 
-print("Debug")
 
+# GAP IN TRAJECTOY
+sample = 35  
+t_gap_start = 30   
+t_gap_end   = 60   
+
+t = np.arange(T) * dt
+x_ref_pos = X[sample, :, 0].cpu().numpy()
+z_meas    = Y[sample, :, 0].cpu().numpy()
+
+mask_obs = np.ones(T, dtype=bool)
+mask_obs[t_gap_start:t_gap_end] = False
+
+U_sample       = U[sample:sample+1]              
+mus_sample     = mus_smooth[sample:sample+1]     
+Sigmas_sample  = Sigmas_smooth[sample:sample+1]  
+
+# We want warmup = t_gap_start steps 
+# then free generation until the end of the sequence.
+warmup_steps = t_gap_start
+gen_steps    = T - warmup_steps   # so total n_steps = T
+
+with torch.no_grad():
+    Y_gen, Z_gen, A_gen, B_gen, C_gen = kf.generate_sample(
+        U_sample, mus_sample, Sigmas_sample,
+        gen_steps=gen_steps,
+        warmup_steps=warmup_steps,
+        deterministic=True   
+    )
+    # Y_gen: [1, T, p]
+    y_gen_np = Y_gen[0].cpu().numpy()[:, 0]  # [T]
+
+plt.figure()
+plt.plot(t, x_ref_pos, label="Reference", linestyle="--", color="black")
+plt.scatter(
+    t[mask_obs], z_meas[mask_obs],
+    label="Observed measurements", marker="x", alpha=0.6
+)
+plt.plot(
+    t[t_gap_start:t_gap_end],
+    y_gen_np[t_gap_start:t_gap_end],
+    label="Generated (imputation via KF)", color="red"
+)
+plt.plot(t, y_gen_np, label="Generated full trajectory", color="red", linestyle=":")
+plt.axvspan(t[t_gap_start], t[t_gap_end-1], color="grey", alpha=0.15, label="Gap region")
+plt.xlabel("Time [s]")
+plt.ylabel("Altitude [m]")
+plt.title("Gap in trajectory & generative Kalman model imputation")
+plt.legend()
+plt.grid(True)
+plt.show()
+
+
+# ===============================
+# Completely new trajectory generation
+# ===============================
+n_gen = 100  # length of new sequence
+
+# 1) Generate a *new* physical rocket trajectory using the SAME simulator
+Y_real, U_real, X_real = simulate_rocket_batch(
+    B=1, T=n_gen, dt=dt,
+    std_dyn=std_dyn,
+    std_meas=std_obs,
+)
+
+# Move to same device/dtype as the KF
+Y_real = Y_real.to(kf.mu0.device)
+U_real = U_real.to(kf.mu0.device)
+X_real = X_real.to(kf.mu0.device)
+
+# Extract "reality"
+x_true = X_real[0, :, 0].cpu().numpy()   # true altitude
+z_true = Y_real[0, :, 0].cpu().numpy()   # noisy measurements
+t_gen  = np.arange(n_gen) * dt
+
+U_new = U_real.clone()  
+
+n_mc = 50
+samples = []
+
+with torch.no_grad():
+    for _ in range(n_mc):
+        Y_mc, _, _, _, _ = kf.generate_sample(
+            U_new,
+            mus_t=None,         
+            Sigmas_t=None,
+            gen_steps=n_gen,
+            warmup_steps=0,
+            deterministic=False  
+        )
+        samples.append(Y_mc[0, :, 0].cpu().numpy())
+
+samples = np.stack(samples, axis=0)  
+mean_y = samples.mean(axis=0)
+std_y  = samples.std(axis=0)
+
+plt.figure()
+plt.plot(t_gen, x_true, label="True altitude (simulated)", color="black", linestyle="--")
+plt.plot(t_gen, mean_y, label="KVAE generated altitude (mean)", color="purple")
+plt.fill_between(
+    t_gen,
+    mean_y - std_y,
+    mean_y + std_y,
+    alpha=0.2,
+    color="purple",
+    label="KVAE ±1 std (MC)"
+)
+plt.xlabel("Time [s]")
+plt.ylabel("Altitude [m]")
+plt.title("New trajectory: true rocket vs KVAE generative model")
+plt.legend()
+plt.grid(True)
+plt.show()
+
+
+print("Debug")
 
 

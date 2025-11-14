@@ -42,9 +42,7 @@ class DynamicsParameter(nn.Module):
     def reset_state(self):
         self.lstm_state = None
 
-    def get_ABC(self):
-        return self.A, self.B, self.C
-
+    #TODO: why only a and not z?
     def compute_step(self, a_tprev):
         batch = a_tprev.size(0)
 
@@ -172,8 +170,8 @@ class KalmanFilter(nn.Module):
         mu    = self.mu0.expand(batch, -1)            # [B,n]
         Sigma = self.Sigma0.expand(batch, -1, -1)     # [B,n,n]
 
-        # Get initial A, B, C matrices
-        A, B, C = self.dyn_params.get_ABC()
+        # Get initial A, B, C matrices NOTE: using zeros as priming input
+        A, B, C = self.dyn_params.compute_step(torch.zeros((batch, self.p), device=Y.device, dtype=Y.dtype))
 
         A_list = []
         B_list = []
@@ -341,3 +339,73 @@ class KalmanFilter(nn.Module):
             entropy.sum()
         ) / denom
         return elbo
+    
+
+    def generate_sample(self, U, mus_t, Sigmas_t, gen_steps, warmup_steps=1, deterministic=True):
+        """
+        Generate a sample 
+        Args:
+            mus_t:      [B,T,n]   
+            Sigmas_t:   [B,T,n,n]  
+        """
+        device = self.Q.device
+        dtype  = self.Q.dtype
+
+        batch = U.size(0)
+        n_steps = gen_steps + warmup_steps
+
+        # If warmup, use filtered means as initial observation
+        if warmup_steps > 0 and mus_t is not None:
+            z = mus_t[:, 0, :].unsqueeze(-1)  # [B,n,1]
+        # Otherwise, sample from prior 
+        else:
+            prior = MultivariateNormal(self.mu0, self.Sigma0)
+            z = prior.sample((batch,)).unsqueeze(-1)  # [B,n,1]
+
+        if deterministic:
+            epsilon = torch.zeros((batch, n_steps, self.n), device=device, dtype=dtype)
+            delta   = torch.zeros((batch, n_steps, self.p), device=device, dtype=dtype)
+        else:
+            # Process noise
+            epsilon_mvn = MultivariateNormal(torch.zeros(self.n, device=device, dtype=dtype), self.Q)
+            epsilon = epsilon_mvn.sample((batch, n_steps))  # [B,n_steps,n]
+            # Measurement noise
+            delta_mvn = MultivariateNormal(torch.zeros(self.p, device=device, dtype=dtype), self.R)
+            delta = delta_mvn.sample((batch, n_steps))  # [B,n_steps,p]
+
+        self.dyn_params.reset_state()
+        A, B, C = self.dyn_params.compute_step(
+            torch.zeros((batch, self.p), device=device, dtype=dtype)
+        )
+
+        Y_list, Z_list = [], []
+        A_list, B_list, C_list = [], [], []
+        for t in range(n_steps):
+            # Force to use estimates for warmup steps
+            if t  < warmup_steps and mus_t is not None:
+                z = mus_t[:, t, :] # [B,n,1]
+            else:
+                u_t = U[:, t, :].unsqueeze(-1) # [B,m,1]
+                # [B,n] = [B,n,n] @ [B,n,1] + [B,n,m] @ [B,m,1] + [B,n]
+                z = A @ z + B @ u_t + epsilon[:, t].unsqueeze(-1)
+
+            # Compute observation
+            # [B,p] = [B,p,n] @ [B,n,1]
+            y = C @ z + delta[:, t].unsqueeze(-1)
+
+            # Store results
+            Y_list.append(y.squeeze(-1))
+            Z_list.append(z.squeeze(-1))
+            A_list.append(A)
+            B_list.append(B)
+            C_list.append(C)
+
+            # Compute A, B, C (for next step)
+            A, B, C = self.dyn_params.compute_step(y.squeeze(-1))
+
+        Y_gen = torch.stack(Y_list, 1)
+        Z_gen = torch.stack(Z_list, 1)
+        A_gen = torch.stack(A_list, 1)
+        B_gen = torch.stack(B_list, 1)
+        C_gen = torch.stack(C_list, 1)
+        return Y_gen, Z_gen, A_gen, B_gen, C_gen
