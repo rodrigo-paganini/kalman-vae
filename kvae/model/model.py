@@ -15,6 +15,8 @@ class KVAE(nn.Module):
     """
     Kalman Variational Auto-Encoder
     Combines VAE for recognition with LGSSM for dynamics modeling
+
+    TODO: Correct the implementation of this class.
     """
     
     def __init__(self, config: KVAEConfig):
