@@ -8,5 +8,3 @@
 - [ ] Masking of input data (see original implementation).
 
 ### Code
-- [ ] Refactor to create a VAE Torch class, train_vae should only wrap it with Lightning.
-- [ ] Tests
