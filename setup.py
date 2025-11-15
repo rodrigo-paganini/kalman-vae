@@ -8,7 +8,7 @@ setup(
     python_requires='>=3.10',
     install_requires=[
         'numpy',
-        'torch',
+        'torch==2.9.0',
         'lightning',
         'tqdm',
         'matplotlib',
