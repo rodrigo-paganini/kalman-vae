@@ -18,7 +18,7 @@ It can be caried out with any of the standard PyMunk datasets.
 To run a training, run
 
 ```bash
-python kvae/train/train_lightning.py
+python kvae/train/train_vae.py
 ```
 
 This will launch a training from parameters drawn from the default `kvae/train/config.yaml` configuration file.
