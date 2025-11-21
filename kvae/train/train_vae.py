@@ -171,9 +171,10 @@ class VAELit(pl.LightningModule):
 
             def norm(imgs: torch.Tensor) -> torch.Tensor:
                 imgs = imgs.clone()
-                imgs -= imgs.view(imgs.size(0), -1).min(dim=1)[0].view(-1, 1, 1, 1)
+                mins = imgs.view(imgs.size(0), -1).min(dim=1)[0].view(-1, 1, 1, 1)
+                imgs = imgs - mins
                 m = imgs.view(imgs.size(0), -1).max(dim=1)[0].view(-1, 1, 1, 1)
-                m[m == 0] = 1.0
+                m = m.masked_fill(m == 0, 1.0)
                 return imgs / m
 
             orig_n = norm(orig)
