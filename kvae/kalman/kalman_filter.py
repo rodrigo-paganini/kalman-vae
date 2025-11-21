@@ -8,9 +8,9 @@ import matplotlib.pyplot as plt
 class DynamicsParameter(nn.Module):
     def __init__(self, A, B, C, hidden_lstm=32):
         """
-        A0: [K, n,n] initial state transition matrix
-        B0: [K, n,m] initial control input matrix
-        C0: [K, p,n] initial observation matrix
+        A0: [K, n, n] initial state transition matrix
+        B0: [K, n, m] initial control input matrix
+        C0: [K, p, n] initial observation matrix
         """
         super().__init__()
         self.K = A.size(0)  
@@ -23,7 +23,9 @@ class DynamicsParameter(nn.Module):
         self.B = nn.Parameter(B.clone())
         self.C = nn.Parameter(C.clone())
 
-        self.lstm_state = None 
+        # No persistent LSTM state kept on the module; callers should
+        # manage any state if needed. This avoids storing tensors with
+        # autograd history on module attributes.
 
         if self.K > 1:
             self.lstm = nn.LSTM(
@@ -40,10 +42,13 @@ class DynamicsParameter(nn.Module):
             self.head_w = nn.Linear(hidden_lstm, self.K)
 
     def reset_state(self):
-        self.lstm_state = None
+        # kept for backward compatibility; no-op in stateless implementation
+        return
 
-    #TODO: why only a and not z?
-    def compute_step(self, a_tprev):
+    # Stateless compute_step: accepts an optional `state` and returns
+    # (A, B, C, new_state). Callers should pass the previous LSTM state
+    # (or `None`) and manage it across time steps.
+    def compute_step(self, a_tprev, state=None):
         batch = a_tprev.size(0)
 
         if self.K == 1:
@@ -51,25 +56,30 @@ class DynamicsParameter(nn.Module):
             B = self.B[0].expand(batch, -1, -1)
             C = self.C[0].expand(batch, -1, -1)
 
-            return A, B, C
+            return A, B, C, None
 
-        else:
-            a_tprev = a_tprev.unsqueeze(1)  
+        # K > 1: run LSTM for this step using provided state
+        a_tprev = a_tprev.unsqueeze(1)
+        # `state` should be a tuple (h, c) or None
+        h, new_state = self.lstm(a_tprev, state)
+        f = self.mlp(h)
+        w = torch.softmax(self.head_w(f), dim=-1).squeeze(1)
 
-            h, new_state = self.lstm(a_tprev, self.lstm_state)
-            f = self.mlp(h)                 
-            self.w = torch.softmax(self.head_w(f), dim=-1).squeeze(1)  
-            
-            self.lstm_state = new_state
+        A = torch.einsum('bk,kij->bij', w, self.A)
+        B = torch.einsum('bk,knm->bnm', w, self.B)
+        C = torch.einsum('bk,kpn->bpn', w, self.C)
 
-            A = torch.einsum('bk,kij->bij', self.w, self.A)
-            B = torch.einsum('bk,knm->bnm', self.w, self.B)
-            C = torch.einsum('bk,kpn->bpn', self.w, self.C)
-
-            return A, B, C
+        return A, B, C, new_state
         
 
 class KalmanFilter(nn.Module):
+    '''
+        std_dyn : float
+        std_obs : float
+        mu0: [n]
+        Sigma0: [n,n]
+        dyn_params: DynamicsParameter
+    '''
     def __init__(self, std_dyn, std_obs, mu0, Sigma0, dyn_params):
         super().__init__()
         # Dynamics parameter network
@@ -167,11 +177,15 @@ class KalmanFilter(nn.Module):
             Sigmas_pred: [B,T,n,n] predicted covariances (Sigma_t,t-1)
         """
         batch, T, _ = Y.shape
+        # Manage a local, per-call LSTM state for dynamics parameters so
+        # the DynamicsParameter remains stateless. This prevents hidden
+        # state carried across calls causing shape mismatches.
+        state = None
         mu    = self.mu0.expand(batch, -1)            # [B,n]
         Sigma = self.Sigma0.expand(batch, -1, -1)     # [B,n,n]
 
         # Get initial A, B, C matrices NOTE: using zeros as priming input
-        A, B, C = self.dyn_params.compute_step(torch.zeros((batch, self.p), device=Y.device, dtype=Y.dtype))
+        A, B, C, state = self.dyn_params.compute_step(torch.zeros((batch, self.p), device=Y.device, dtype=Y.dtype), state)
 
         A_list = []
         B_list = []
@@ -200,7 +214,7 @@ class KalmanFilter(nn.Module):
             # Update for next step
             mu, Sigma = mu_t_t, Sigma_t_t
             # Compute A, B, C at time t (to be used at next step)
-            A, B, C = self.dyn_params.compute_step(y_t)  
+            A, B, C, state = self.dyn_params.compute_step(y_t, state)
 
 
         return torch.stack(mus_filt, 1), torch.stack(Sigmas_filt, 1), torch.stack(mus_pred, 1), torch.stack(Sigmas_pred, 1), \
@@ -373,9 +387,10 @@ class KalmanFilter(nn.Module):
             delta_mvn = MultivariateNormal(torch.zeros(self.p, device=device, dtype=dtype), self.R)
             delta = delta_mvn.sample((batch, n_steps))  # [B,n_steps,p]
 
-        self.dyn_params.reset_state()
-        A, B, C = self.dyn_params.compute_step(
-            torch.zeros((batch, self.p), device=device, dtype=dtype)
+        # Manage local state for dynamics parameters
+        state = None
+        A, B, C, state = self.dyn_params.compute_step(
+            torch.zeros((batch, self.p), device=device, dtype=dtype), state
         )
 
         Y_list, Z_list = [], []
@@ -401,7 +416,7 @@ class KalmanFilter(nn.Module):
             C_list.append(C)
 
             # Compute A, B, C (for next step)
-            A, B, C = self.dyn_params.compute_step(y.squeeze(-1))
+            A, B, C, state = self.dyn_params.compute_step(y.squeeze(-1), state)
 
         Y_gen = torch.stack(Y_list, 1)
         Z_gen = torch.stack(Z_list, 1)
