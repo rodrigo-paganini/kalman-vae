@@ -5,7 +5,7 @@ import torch.nn.functional as F
 
 from kvae.model.config import KVAEConfig
 
-
+# TODO: Eliminate this file? Replace DynamicsParameter (Dani implementation)
 class DynamicsParameterNetwork(nn.Module):
     """
     LSTM network that outputs mixture weights alpha_t for the LGSSM

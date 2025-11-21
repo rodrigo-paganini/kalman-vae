@@ -20,6 +20,7 @@ import shutil
 from typing import Optional, Callable
 
 import torch
+import numpy as np
 import pytorch_lightning as pl
 from pytorch_lightning.loggers import TensorBoardLogger
 from pytorch_lightning.callbacks import ModelCheckpoint
@@ -40,6 +41,12 @@ class KVAELit(pl.LightningModule):
         self.cfg = cfg
         self.model = KVAE(cfg)
         self.lr = lr
+        # Gradient clipping threshold (L2 norm) taken from config
+        # (set to a large value to effectively disable clipping)
+        try:
+            self.grad_clip_norm = float(self.cfg.grad_clip_norm)
+        except Exception:
+            self.grad_clip_norm = 1.0
         
         # placeholders for validation-image logging
         self._val_orig = None
@@ -67,6 +74,11 @@ class KVAELit(pl.LightningModule):
         self.log('train/total_loss', losses['total_loss'], on_step=True, on_epoch=True, prog_bar=True)
         self.log('train/recon_loss', losses['recon_loss'], on_step=True, on_epoch=True)
         self.log('train/kl_loss', losses['kl_loss'], on_step=True, on_epoch=True)
+        # Log Kalman ELBO components for numeric inspection
+        if 'elbo_kf' in losses:
+            self.log('train/elbo_kf', losses['elbo_kf'], on_step=True, on_epoch=True)
+        if 'elbo_total' in losses:
+            self.log('train/elbo_total', losses['elbo_total'], on_step=True, on_epoch=True)
         # accumulate for epoch-level logging (v2 compatibility)
         try:
             self._train_loss_sum += float(losses['total_loss'].detach().cpu().item())
@@ -76,6 +88,40 @@ class KVAELit(pl.LightningModule):
         self._train_loss_count += 1
 
         return losses['total_loss']
+
+    def on_after_backward(self):
+        """Clip gradients and log their norm after backward, per batch.
+
+        This runs after loss.backward() and before optimizer.step(). We use
+        torch.nn.utils.clip_grad_norm_ which returns the total norm.
+        """
+        try:
+            params = [p for p in self.model.parameters() if p.grad is not None]
+            if len(params) == 0:
+                return
+            total_norm = torch.nn.utils.clip_grad_norm_(params, self.grad_clip_norm)
+            # log gradient norm for monitoring (per-step and epoch aggregate)
+            self.log('train/grad_norm', total_norm, on_step=True, on_epoch=True, prog_bar=False)
+            # Also add gradient histograms to TensorBoard (if available)
+            try:
+                logger = getattr(self, 'logger', None)
+                if logger is not None and hasattr(logger, 'experiment'):
+                    tb = logger.experiment
+                    # log per-parameter gradient histograms (may be heavy)
+                    for name, p in self.model.named_parameters():
+                        if p.grad is None:
+                            continue
+                        try:
+                            grad = p.grad.detach().cpu().numpy()
+                            tb.add_histogram(f'grads/{name}', grad, global_step=self.global_step)
+                        except Exception:
+                            # ignore logging failures per-parameter
+                            pass
+            except Exception:
+                pass
+        except Exception:
+            # Don't crash training if grad logging fails
+            pass
 
     def validation_step(self, batch, batch_idx):
         # support datasets that return either tensors (TensorDataset) or dicts
@@ -88,6 +134,11 @@ class KVAELit(pl.LightningModule):
         out = self.model(x)
         losses = self.model.compute_loss(x, out)
         self.log('val/total_loss', losses['total_loss'], on_step=False, on_epoch=True, prog_bar=True)
+        # Validation logging for ELBO components
+        if 'elbo_kf' in losses:
+            self.log('val/elbo_kf', losses['elbo_kf'], on_step=False, on_epoch=True)
+        if 'elbo_total' in losses:
+            self.log('val/elbo_total', losses['elbo_total'], on_step=False, on_epoch=True)
 
         # keep first batch's first sequence for image logging at epoch end
         if batch_idx == 0:
@@ -146,9 +197,10 @@ class KVAELit(pl.LightningModule):
             # normalize per-frame
             def norm(imgs: torch.Tensor) -> torch.Tensor:
                 imgs = imgs.clone()
-                imgs -= imgs.view(imgs.size(0), -1).min(dim=1)[0].view(-1, 1, 1, 1)
+                mins = imgs.view(imgs.size(0), -1).min(dim=1)[0].view(-1, 1, 1, 1)
+                imgs = imgs - mins
                 m = imgs.view(imgs.size(0), -1).max(dim=1)[0].view(-1, 1, 1, 1)
-                m[m == 0] = 1.0
+                m = m.masked_fill(m == 0, 1.0)
                 return imgs / m
 
             orig_n = norm(orig)
@@ -387,6 +439,13 @@ def main():
     trainer_kwargs = set_accelerator_for(trainer_kwargs, device_pref)
 
     trainer = pl.Trainer(**trainer_kwargs)
+    # Enable anomaly detection to get a traceback for any in-place op that
+    # corrupts the autograd graph. Remove or disable in production.
+    try:
+        import torch
+        torch.autograd.set_detect_anomaly(True)
+    except Exception:
+        pass
     trainer.fit(lit, datamodule=dm)
 
 
