@@ -7,8 +7,9 @@ from typing import Optional, Tuple, Dict
 from kvae.model.config import KVAEConfig
 from kvae.model.vae import Encoder, Decoder
 from kvae.model.lgssm import LGSSM
-from kvae.kalman.kalman_filter import DynamicsParameter, KalmanFilter
-from kvae.model.lstm import DynamicsParameterNetwork
+from kvae.kalman.kalman_filter import KalmanFilter
+
+from kvae.model.lstm import DynamicsParameter
 from kvae.utils.losses import vae_loss
 
 
@@ -161,6 +162,7 @@ class KVAE(nn.Module):
             Dictionary with loss components
         """
         batch_size, T = x.shape[:2]
+        img_elements = x.shape[2] * x.shape[3] * x.shape[4] if x.dim() == 5 else x[0,0].numel()
         
         # Reconstruction loss (downweighted as in paper)
         # recon_loss = F.mse_loss(outputs['x_recon'], x, reduction='sum')
@@ -176,7 +178,6 @@ class KVAE(nn.Module):
         a = outputs['a_samples']
         x_mu = outputs['x_recon']
 
-        # FALTAN
         x_var = torch.tensor(self.config.noise_pixel_var, device=x.device, dtype=x_mu.dtype)    
         Sigmas_smooth = torch.eye(self.z_dim).unsqueeze(0).unsqueeze(0).repeat(batch_size, T, 1, 1).to(x.device)
         
@@ -189,7 +190,12 @@ class KVAE(nn.Module):
         # KL term (simplified)
         #kl_loss = -0.5 * torch.sum(1 + a_logvar - a_mu.pow(2) - a_logvar.exp())
         #kl_loss = kl_loss / batch_size
-        total, recon, kl = vae_loss(x, x_mu, x_var, a, a_mu, a_logvar, scale_reconstruction=self.config.scale_reconstruction)
+        vae_total, recon, kl = vae_loss(x, x_mu, x_var, a, a_mu, a_logvar, scale_reconstruction=self.config.scale_reconstruction)
+        if self.config.recon_weight:
+            recon = recon * self.config.recon_weight
+        recon = recon / batch_size * (batch_size * T * img_elements) # check if congig.recon_weight exists or is the same of scale_reconstruction
+        kl = kl / (batch_size * T * self.a_dim)
+        vae_total = recon + kl
 
         u = outputs['u']
         A_list, B_list, C_list = outputs['alpha']
@@ -199,16 +205,16 @@ class KVAE(nn.Module):
         # "variable needed for gradient computation has been modified"
         # RuntimeError).
         elbo_kf = self.kalman_filter.elbo(z_mean, Sigmas_smooth, a.clone(), u, A_list, B_list, C_list)
-        
+        elbo_kf = elbo_kf / (batch_size * T)
         # Total loss
-        # total = recon * scale_reconstruction + kl
-        # total = -log_px_given_a*scale_reconstruction + log_qa_given_x
-        elbo_total = elbo_kf - total 
+        # vae_total = recon * scale_reconstruction + kl
+        # vae_total = -log_px_given_a*scale_reconstruction + log_qa_given_x
+        elbo_total = elbo_kf - vae_total 
         
         return {
             'total_loss': elbo_total,
-            'recon_loss': recon,
-            'kl_loss': kl,
+            'recon_vae_loss': recon,
+            'kl_vae_loss': kl,
             'elbo_kf': elbo_kf,
-            'elbo_total': elbo_total,
+            'vae_total': vae_total,
         }

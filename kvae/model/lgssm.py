@@ -5,6 +5,7 @@ from typing import Optional, Tuple, Dict
 
 from kvae.model.config import KVAEConfig
 
+#TODO: THIS FUNCTION IS NOT USED
 class LGSSM(nn.Module):
     """
     Linear Gaussian State Space Model with time-varying parameters
