@@ -5,7 +5,7 @@ dataset:
   # 'toy' or 'pymunk'
   type: pymunk
   # for 'pymunk' sets path to the .npz file containing 'images' and 'state'
-  path: /Users/rodrigopaganini/master/data/pgm/kvae/box.npz
+  path: C:\Users\adiaz\OneDrive\Pictures\Documents\MVA\First_Semester\Proba_Graph_Models\kvae\data\box.npz
   kwargs: {}
 
 transforms:
@@ -19,7 +19,7 @@ training:
   ckpt_every: 5
   gpus: 0
   # device: 'auto'|'cpu'|'cuda'|'mps' - if 'auto', script will prefer cuda, then mps, then cpu
-  device: auto
+  device: cpu
   logdir: runs
 
 # Any other user fields are accepted and ignored by default

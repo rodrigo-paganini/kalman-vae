@@ -71,14 +71,13 @@ class KVAELit(pl.LightningModule):
             x = batch
         out = self.model(x)
         losses = self.model.compute_loss(x, out)
-        self.log('train/total_loss', losses['total_loss'], on_step=True, on_epoch=True, prog_bar=True)
-        self.log('train/recon_loss', losses['recon_loss'], on_step=True, on_epoch=True)
-        self.log('train/kl_loss', losses['kl_loss'], on_step=True, on_epoch=True)
+        self.log('train/total_loss', losses['total_loss'], on_step=False, on_epoch=True, prog_bar=True)
+        self.log('train/recon_vae_loss', losses['recon_vae_loss'], on_step=False, on_epoch=True)
+        self.log('train/kl_vae_loss', losses['kl_vae_loss'], on_step=False, on_epoch=True)
+        self.log('train/vae_total', losses['vae_total'], on_step=False, on_epoch=True)
         # Log Kalman ELBO components for numeric inspection
         if 'elbo_kf' in losses:
-            self.log('train/elbo_kf', losses['elbo_kf'], on_step=True, on_epoch=True)
-        if 'elbo_total' in losses:
-            self.log('train/elbo_total', losses['elbo_total'], on_step=True, on_epoch=True)
+            self.log('train/elbo_kf', losses['elbo_kf'], on_step=False, on_epoch=True)
         # accumulate for epoch-level logging (v2 compatibility)
         try:
             self._train_loss_sum += float(losses['total_loss'].detach().cpu().item())
@@ -101,7 +100,7 @@ class KVAELit(pl.LightningModule):
                 return
             total_norm = torch.nn.utils.clip_grad_norm_(params, self.grad_clip_norm)
             # log gradient norm for monitoring (per-step and epoch aggregate)
-            self.log('train/grad_norm', total_norm, on_step=True, on_epoch=True, prog_bar=False)
+            self.log('train/grad_norm', total_norm, on_step=False, on_epoch=True, prog_bar=False)
             # Also add gradient histograms to TensorBoard (if available)
             try:
                 logger = getattr(self, 'logger', None)
@@ -123,6 +122,65 @@ class KVAELit(pl.LightningModule):
             # Don't crash training if grad logging fails
             pass
 
+    def on_train_epoch_start(self) -> None:
+        """Pretraining schedule from the paper.
+
+        For the first `pretrain_epochs` epochs, scale reconstruction weight to
+        `pretrain_recon_weight` and freeze the dynamics network except for the
+        global matrices named `A`, `B`, or `C`.
+        """
+        cfg = getattr(self, 'cfg', None)
+        if cfg is None:
+            return None
+
+        pre_epochs = getattr(cfg, 'pretrain_epochs', 0)
+        pre_w = getattr(cfg, 'pretrain_recon_weight', None)
+        if not pre_epochs or pre_w is None:
+            return None
+
+        # On the first epoch, log dynamics parameter names for verification
+        if self.current_epoch == 0:
+            try:
+                dyn = self.model.kalman_filter.dynamics
+                names = [n for n, _ in dyn.named_parameters()]
+                # write a compact string to the logger for later inspection
+                try:
+                    self.log('debug/dynamics_param_names', '|'.join(names), prog_bar=False)
+                except Exception:
+                    pass
+            except Exception:
+                pass
+
+        if self.current_epoch < pre_epochs:
+            # scale down reconstruction term
+            self.model.config.recon_weight = pre_w
+
+            # freeze dynamics network except A/B/C
+            try:
+                dyn = self.model.kalman_filter.dynamics
+                for name, p in dyn.named_parameters():
+                    base = name.split('.')[-1]
+                    if base in ('A', 'B', 'C'):
+                        p.requires_grad = True
+                    else:
+                        p.requires_grad = False
+            except Exception:
+                pass
+        else:
+            # restore recon weight and unfreeze all dynamics params
+            try:
+                self.model.config.recon_weight = cfg.recon_weight
+            except Exception:
+                pass
+            try:
+                dyn = self.model.kalman_filter.dynamics
+                for _, p in dyn.named_parameters():
+                    p.requires_grad = True
+            except Exception:
+                pass
+
+        return None
+
     def validation_step(self, batch, batch_idx):
         # support datasets that return either tensors (TensorDataset) or dicts
         if isinstance(batch, dict):
@@ -134,11 +192,12 @@ class KVAELit(pl.LightningModule):
         out = self.model(x)
         losses = self.model.compute_loss(x, out)
         self.log('val/total_loss', losses['total_loss'], on_step=False, on_epoch=True, prog_bar=True)
-        # Validation logging for ELBO components
+        self.log('val/recon_vae_loss', losses['recon_vae_loss'], on_step=False, on_epoch=True)
+        self.log('val/kl_vae_loss', losses['kl_vae_loss'], on_step=False, on_epoch=True)
+        self.log('val/vae_total', losses['vae_total'], on_step=False, on_epoch=True)
+        # Log Kalman ELBO components for numeric inspection
         if 'elbo_kf' in losses:
             self.log('val/elbo_kf', losses['elbo_kf'], on_step=False, on_epoch=True)
-        if 'elbo_total' in losses:
-            self.log('val/elbo_total', losses['elbo_total'], on_step=False, on_epoch=True)
 
         # keep first batch's first sequence for image logging at epoch end
         if batch_idx == 0:

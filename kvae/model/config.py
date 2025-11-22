@@ -34,6 +34,9 @@ class KVAEConfig:
     
     # Training parameters
     recon_weight: float = 0.3
+    # Pretraining: scale reconstruction and number of epochs to pretrain
+    pretrain_recon_weight: float = 0.3
+    pretrain_epochs: int = 5
     # Gradient clipping threshold (L2 norm). Use a large value to disable.
     grad_clip_norm: float = 1.0
     
