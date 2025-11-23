@@ -21,8 +21,8 @@ import imageio
 import numpy as np
 
 
-# ============= TESTING  =============
-def _pad_to_block(x: np.ndarray, block: int = 16) -> np.ndarray:
+# ============= DEBUG TESTING  =============
+def _pad_to_block(x, block = 16):
     """Pad H/W to the next multiple of `block` for video codecs."""
     if x.ndim != 4:
         return x
@@ -104,6 +104,7 @@ def reconstruct_and_save(
     save_frames(x_true_seq,  str(out_dir / f"{prefix}_true.mp4"))
     save_frames(x_recon_seq, str(out_dir / f"{prefix}_recon.mp4"))
 
+
 # ======================================================================
 
 def load_config(path):
@@ -132,7 +133,11 @@ def build_dataloaders(ds_path, batch_size, T):
 
 def train_one_epoch(model, loader, optimizer, device, grad_clip_norm):
     model.train()
-    total = 0.0
+    total_loss = 0.0
+    total_vae  = 0.0
+    total_kf   = 0.0
+    n_batches  = 0
+
     for batch in loader:
         # Reset Kalman LSTM state at the start of each sequence
         model.kalman_filter.dyn_params.reset_state()
@@ -144,37 +149,62 @@ def train_one_epoch(model, loader, optimizer, device, grad_clip_norm):
         optimizer.zero_grad(set_to_none=True)
         outputs = model(x)
         losses = model.compute_loss(x, outputs)
-        loss = losses['loss']
 
-        # Debugging purposes
-        # elbo_kf = losses['elbo_kf']
-        # elbo_vae_total = losses['elbo_vae_total']
-        # print(f"Train step loss: {loss.item():.4f} | ELBO KF: {elbo_kf.item():.4f} | ELBO VAE total: {elbo_vae_total.item():.4f}")
+        loss          = losses["loss"]
+        elbo_kf       = losses["elbo_kf"]
+        elbo_vae_tot  = losses["elbo_vae_total"]
 
         loss.backward()
 
-        # if grad_clip_norm and grad_clip_norm > 0:
-        #     torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip_norm)
+        if grad_clip_norm and grad_clip_norm > 0:
+            torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip_norm)
 
         optimizer.step()
-        total += float(loss.detach().cpu())
 
-    return total / max(len(loader), 1)
+        # Accumulate for epoch averages
+        total_loss += float(loss.detach().cpu())
+        total_kf   += float(elbo_kf.detach().cpu())
+        total_vae  += float(elbo_vae_tot.detach().cpu())
+        n_batches  += 1
+
+    denom = max(n_batches, 1)
+    return {
+        "loss":          total_loss / denom,
+        "elbo_kf":       total_kf   / denom,   # Kalman term (ELBO part)
+        "elbo_vae_total": total_vae / denom,   # VAE term (ELBO part)
+    }
 
 
 @torch.no_grad()
 def evaluate(model, loader, device):
     model.eval()
-    total = 0.0
+    total_loss = 0.0
+    total_vae  = 0.0
+    total_kf   = 0.0
+    n_batches  = 0
+
     for batch in loader:
         model.kalman_filter.dyn_params.reset_state()
 
-        x = batch["images"].float().to(device)   
+        x = batch["images"].float().to(device)
         outputs = model(x)
-        loss = model.compute_loss(x, outputs)["loss"]
-        total += float(loss.detach().cpu())
+        losses = model.compute_loss(x, outputs)
 
-    return total / max(len(loader), 1)
+        loss          = losses["loss"]
+        elbo_kf       = losses["elbo_kf"]
+        elbo_vae_tot  = losses["elbo_vae_total"]
+
+        total_loss += float(loss.detach().cpu())
+        total_kf   += float(elbo_kf.detach().cpu())
+        total_vae  += float(elbo_vae_tot.detach().cpu())
+        n_batches  += 1
+
+    denom = max(n_batches, 1)
+    return {
+        "loss":          total_loss / denom,
+        "elbo_kf":       total_kf   / denom,
+        "elbo_vae_total": total_vae / denom,
+    }
 
 
 def save_checkpoint(path, model, optimizer, epoch, train_loss, val_loss):
@@ -189,15 +219,20 @@ def save_checkpoint(path, model, optimizer, epoch, train_loss, val_loss):
     torch.save(payload, path)
 
 
-if __name__ == "__main__":
+def set_kalman_trainable(model, trainable):
+    for p in model.kalman_filter.dyn_params.parameters():
+        p.requires_grad = trainable
 
+
+if __name__ == "__main__":
     # Core settings live right here; adjust to taste.
-    max_epochs = 20
+    max_epochs = 50
     batch_size = 16
-    lr = 1e-3
+    lr = 7e-3
     ckpt_every = 0
     logdir = "runs"
     device = "cpu"
+    warmup_alpha_epochs = 5
     T = 10
 
     cfg = KVAEConfig()
@@ -228,20 +263,34 @@ if __name__ == "__main__":
     ckpt_dir = Path(logdir) if logdir else None
 
     for epoch in range(1, max_epochs + 1):
-        train_loss = train_one_epoch(model, train_loader, optimizer, device, cfg.grad_clip_norm)
-        val_loss   = evaluate(model, val_loader, device)
-        print(f"Epoch {epoch:03d} | train {train_loss:.6f} | val {val_loss:.6f}")
+        # Freeze alpha during the first few epochs
+        train_alpha = epoch > warmup_alpha_epochs
+        if epoch == warmup_alpha_epochs + 1: print("Unfreezing alpha for training")
+        set_kalman_trainable(model, train_alpha)
+    
+        train_metrics = train_one_epoch(model, train_loader, optimizer, device, cfg.grad_clip_norm)
+        val_metrics   = evaluate(model, val_loader, device)
+
+        train_loss = train_metrics["loss"]
+        val_loss   = val_metrics["loss"]
+
+        print(
+            f"Epoch {epoch:03d} | "
+            f"train loss {train_loss:.6f} "
+            f"(VAE {train_metrics['elbo_vae_total']:.6f}, KF {train_metrics['elbo_kf']:.6f}) | "
+            f"val loss {val_loss:.6f} "
+            f"(VAE {val_metrics['elbo_vae_total']:.6f}, KF {val_metrics['elbo_kf']:.6f})"
+        )
 
         if ckpt_dir:
-            # Save best checkpoint
             best_path = ckpt_dir / "best.pt"
             if val_loss < best_val:
                 best_val = val_loss
                 save_checkpoint(best_path, model, optimizer, epoch, train_loss, val_loss)
-            # Optional periodic checkpoints
+
             if ckpt_every > 0 and epoch % ckpt_every == 0:
                 ckpt_path = ckpt_dir / f"epoch-{epoch:03d}.pt"
                 save_checkpoint(ckpt_path, model, optimizer, epoch, train_loss, val_loss)
 
-        out_dir = Path(logdir) if logdir else Path(".")
-        reconstruct_and_save(model, val_loader, device, out_dir, prefix=f"vae_epoch{epoch:03d}")
+    out_dir = Path(logdir) if logdir else Path(".")
+    reconstruct_and_save(model, val_loader, device, out_dir, prefix=f"vae")
