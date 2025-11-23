@@ -1,4 +1,5 @@
 
+from sympy import denom
 import torch
 
 from kvae.model.config import KVAEConfig
@@ -77,10 +78,21 @@ def vae_loss(
         recon: Reconstruction loss term.
         kl: KL divergence loss.
     """
+    B, T, C, H, W = x.shape
+    num_pixels = C * H * W
+    denom = B * T * num_pixels # normalize to per (B*T*pixels)
+
     log_px_given_a, log_qa_given_x = log_likelihood(x, x_mu, x_var, a, a_mu, a_var)
-    recon = -log_px_given_a
-    kl = log_qa_given_x
 
-    total = recon * scale_reconstruction + kl
+    # Normalize 
+    log_px_bt = log_px_given_a / denom
+    log_qa_bt = log_qa_given_x / denom
 
-    return total, recon, kl
+    # Positive losses
+    recon   = -log_px_bt       
+    entropy = -log_qa_bt       
+
+    # ELBO_vae = scale * log p(x|a) - log q(a|x)
+    vae_elbo = scale_reconstruction * log_px_given_a - log_qa_given_x
+
+    return vae_elbo, recon, entropy

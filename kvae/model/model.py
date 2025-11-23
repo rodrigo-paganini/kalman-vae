@@ -1,17 +1,10 @@
 from torch import nn
 import torch
-from torch.nn import functional as F
 
-from typing import Optional, Tuple, Dict
-
-from kvae.model.config import KVAEConfig
 from kvae.model.vae import Encoder, Decoder
-from kvae.model.lgssm import LGSSM
 from kvae.kalman.kalman_filter import KalmanFilter
-
-from kvae.model.lstm import DynamicsParameter
+from kvae.kalman.dyn_param import DynamicsParameter
 from kvae.utils.losses import vae_loss
-
 
 
 class KVAE(nn.Module):
@@ -22,7 +15,7 @@ class KVAE(nn.Module):
     TODO: Correct the implementation of this class.
     """
     
-    def __init__(self, config: KVAEConfig):
+    def __init__(self, config):
         super().__init__()
         self.config = config
         
@@ -30,18 +23,14 @@ class KVAE(nn.Module):
         self.encoder = Encoder(config)
         self.decoder = Decoder(config)
         
-        # LGSSM
-        # self.lgssm = LGSSM(config)
-        
         # Dynamics parameter network
         self.K = config.num_modes
         self.z_dim = config.z_dim
         self.a_dim = config.a_dim
-        A_in = torch.randn(self.K, self.z_dim, self.z_dim) * 0.1
+        A_in = torch.randn(self.K, self.z_dim, self.z_dim) * 0.1 # TODO: why?
         B_in = torch.randn(self.K, self.z_dim, self.z_dim) * 0.1
         C_in = torch.randn(self.K, self.a_dim, self.z_dim) * 0.1
         dynamics_net = DynamicsParameter(A_in, B_in, C_in)
-        #self.dynamics_net = DynamicsParameterNetwork(config)
 
         # Kalman filter
         mu0 = torch.zeros(self.z_dim, dtype=torch.float32)
@@ -51,13 +40,13 @@ class KVAE(nn.Module):
         self.kalman_filter = KalmanFilter(std_dyn, std_obs, mu0, Sigma0, dynamics_net)
 
     
-    def reparameterize(self, mu: torch.Tensor, logvar: torch.Tensor) -> torch.Tensor:
-        """Reparameterization trick"""
-        std = torch.exp(0.5 * logvar)
-        eps = torch.randn_like(std)
-        return mu + eps * std
+    def reparameterize(self, mu, var):
+            std = torch.sqrt(var + 1e-6)
+            eps = torch.randn_like(std)
+            return mu + eps * std
+
     
-    def encode_sequence(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    def encode_sequence(self, x):
         """
         Encode full sequence with VAE
         
@@ -70,19 +59,20 @@ class KVAE(nn.Module):
         
         # Flatten batch and time for encoding
         x_flat = x.view(-1, *x.shape[2:])
-        mu, logvar = self.encoder(x_flat)
+        mu, var = self.encoder(x_flat)
         
         # Sample
-        a_samples = self.reparameterize(mu, logvar)
+        a_samples = self.reparameterize(mu, var)
         
         # Reshape back to sequences
         a_samples = a_samples.view(batch_size, T, -1)
         mu = mu.view(batch_size, T, -1)
-        logvar = logvar.view(batch_size, T, -1)
+        var = var.view(batch_size, T, -1)
         
-        return a_samples, mu, logvar
+        return a_samples, mu, var
     
-    def decode_sequence(self, a: torch.Tensor) -> torch.Tensor:
+
+    def decode_sequence(self, a):
         """
         Decode sequence from latent encodings
         
@@ -102,8 +92,8 @@ class KVAE(nn.Module):
         
         return x_recon
     
-    def forward(self, x: torch.Tensor, u: Optional[torch.Tensor] = None,
-                use_smoothing: bool = True) -> Dict:
+
+    def forward(self, x, u=None):
         """
         Full forward pass
         
@@ -116,26 +106,15 @@ class KVAE(nn.Module):
             Dictionary with reconstructions and latent variables
         """
         # Encode sequence
-        a_samples, a_mu, a_logvar = self.encode_sequence(x)
-        
-        # Get dynamics parameters
-        # alpha = self.dynamics_net(a_samples)
-        
+        a_samples, a_mu, a_var = self.encode_sequence(x)
+
         # Kalman filtering
-        # filtered = self.lgssm.kalman_filter(a_samples, alpha, u)
         if u is None:
             u = torch.zeros(x.shape[0], x.shape[1], self.z_dim, device=x.device)
-        # Defensive clone: avoid downstream in-place mutations of `a_samples`
-        # that could corrupt autograd for the encoder outputs.
-        mus_filt, sigms_filt, mus_pred, sigmas_pred, A_list, B_list, C_list = self.kalman_filter.filter(a_samples.clone(), u)
-        
+
         # Kalman smoothing (optional)
-        if use_smoothing:
-            mus_smooth, Sigmas_smooth, _, _, _ = self.kalman_filter.smooth(a_samples.clone(), u)
-            z_mean = mus_smooth
-        else:
-            z_mean = mus_filt
-        
+        mus_smooth, Sigmas_smooth, A_list, B_list, C_list = self.kalman_filter.smooth(a_samples.clone(), u.clone())
+
         # Decode
         x_recon = self.decode_sequence(a_samples)
         
@@ -143,78 +122,62 @@ class KVAE(nn.Module):
             'x_recon': x_recon,
             'a_samples': a_samples,
             'a_mu': a_mu,
-            'a_logvar': a_logvar,
-            'z_mean': z_mean,
-            'alpha': (A_list, B_list, C_list),
-            'filtered': (mus_filt, sigms_filt),
+            'a_var': a_var,
+            'mus_smooth': mus_smooth,
+            'Sigmas_smooth': Sigmas_smooth,
+            'ABC': (A_list, B_list, C_list),
             'u': u,
         }
     
-    def compute_loss(self, x: torch.Tensor, outputs: Dict) -> Dict:
-        """
-        Compute ELBO loss
-        
-        Args:
-            x: Original input sequence
-            outputs: Output dictionary from forward pass
-        
-        Returns:
-            Dictionary with loss components
-        """
+    
+    def compute_loss(self, x, outputs):
         batch_size, T = x.shape[:2]
-        img_elements = x.shape[2] * x.shape[3] * x.shape[4] if x.dim() == 5 else x[0,0].numel()
-        
-        # Reconstruction loss (downweighted as in paper)
-        # recon_loss = F.mse_loss(outputs['x_recon'], x, reduction='sum')
-        # recon_loss = recon_loss / batch_size * self.config.recon_weight
-        
-        # KL divergence for VAE: KL(q(a|x) || p(a|z))
-        # This is approximated by computing p(a|z) using the LGSSM
-        a_mu = outputs['a_mu']
-        a_logvar = outputs['a_logvar']
-        
-        # Get predicted a from z through emission matrix
-        z_mean = outputs['z_mean']
-        a = outputs['a_samples']
-        x_mu = outputs['x_recon']
 
-        x_var = torch.tensor(self.config.noise_pixel_var, device=x.device, dtype=x_mu.dtype)    
-        Sigmas_smooth = torch.eye(self.z_dim).unsqueeze(0).unsqueeze(0).repeat(batch_size, T, 1, 1).to(x.device)
-        
-        #_, _, C_t = self.lgssm.get_matrices(alpha)
-        
-        #a_pred = torch.bmm(C_t.view(-1, C_t.shape[-2], C_t.shape[-1]),
-        #                  z_mean.view(-1, z_mean.shape[-1], 1)).squeeze(-1)
-        #a_pred = a_pred.view(batch_size, T, -1)
-        
-        # KL term (simplified)
-        #kl_loss = -0.5 * torch.sum(1 + a_logvar - a_mu.pow(2) - a_logvar.exp())
-        #kl_loss = kl_loss / batch_size
-        vae_total, recon, kl = vae_loss(x, x_mu, x_var, a, a_mu, a_logvar, scale_reconstruction=self.config.scale_reconstruction)
-        if self.config.recon_weight:
-            recon = recon * self.config.recon_weight
-        recon = recon / batch_size * (batch_size * T * img_elements) # check if congig.recon_weight exists or is the same of scale_reconstruction
-        kl = kl / (batch_size * T * self.a_dim)
-        vae_total = recon + kl
+        a      = outputs['a_samples']      # [B, T, a_dim]
+        a_mu   = outputs['a_mu']           # [B, T, a_dim]
+        a_var  = outputs['a_var']          # [B, T, a_dim]
 
-        u = outputs['u']
-        A_list, B_list, C_list = outputs['alpha']
-        # Clone `a` defensively before passing to the KalmanFilter in case
-        # downstream code performs any in-place operations that would
-        # corrupt the autograd graph for `a` (this avoids the
-        # "variable needed for gradient computation has been modified"
-        # RuntimeError).
-        elbo_kf = self.kalman_filter.elbo(z_mean, Sigmas_smooth, a.clone(), u, A_list, B_list, C_list)
-        elbo_kf = elbo_kf / (batch_size * T)
-        # Total loss
-        # vae_total = recon * scale_reconstruction + kl
-        # vae_total = -log_px_given_a*scale_reconstruction + log_qa_given_x
-        elbo_total = elbo_kf - vae_total 
-        
+        mus_smooth             = outputs['mus_smooth']
+        Sigmas_smooth          = outputs['Sigmas_smooth']
+        A_list, B_list, C_list = outputs['ABC']
+
+        # Controls
+        if 'u' in outputs:
+            u = outputs['u']
+        else:
+            u = torch.zeros(batch_size, T, self.z_dim, device=x.device, dtype=x.dtype)
+
+        # Reconstruction distribution p(x | a)
+        x_mu  = outputs['x_recon']                          # [B, T, C, H, W]
+        x_var = torch.tensor(
+            self.config.noise_pixel_var,
+            device=x.device,
+            dtype=x_mu.dtype
+        )
+
+        #  VAE ELBO
+        vae_elbo, recon, entropy = vae_loss(
+            x, x_mu, x_var,
+            a, a_mu, a_var,
+            scale_reconstruction=self.config.scale_reconstruction,
+        )
+
+        # Kalman ELBO
+        elbo_kf = self.kalman_filter.elbo(
+            mus_smooth, Sigmas_smooth,
+            a, u, A_list, B_list, C_list
+        )
+
+        # Combine
+        elbo_total = elbo_kf + vae_elbo        # sum of ELBO contributions
+        loss = -elbo_total                     # minimize negative ELBO
+
         return {
-            'total_loss': elbo_total,
-            'recon_vae_loss': recon,
-            'kl_vae_loss': kl,
-            'elbo_kf': elbo_kf,
-            'vae_total': vae_total,
+            "loss": loss,
+            "elbo_total": elbo_total,
+            "elbo_kf": elbo_kf,
+            "elbo_vae_total": vae_elbo,
+            "recon": recon,
+            "entropy": entropy,
         }
+

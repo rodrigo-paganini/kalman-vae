@@ -2,7 +2,7 @@ import torch
 from torch.distributions import MultivariateNormal
 import numpy as np
 from kalman_filter import KalmanFilter
-from model.lstm import DynamicsParameter
+from dyn_param import DynamicsParameter
 import matplotlib.pyplot as plt
 
 def simulate_rocket_batch(B, T, dt, std_dyn=2.0, std_meas=4.0):
