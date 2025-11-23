@@ -123,63 +123,24 @@ class KVAELit(pl.LightningModule):
             pass
 
     def on_train_epoch_start(self) -> None:
-        """Pretraining schedule from the paper.
-
-        For the first `pretrain_epochs` epochs, scale reconstruction weight to
-        `pretrain_recon_weight` and freeze the dynamics network except for the
-        global matrices named `A`, `B`, or `C`.
-        """
-        cfg = getattr(self, 'cfg', None)
-        if cfg is None:
-            return None
-
-        pre_epochs = getattr(cfg, 'pretrain_epochs', 0)
-        pre_w = getattr(cfg, 'pretrain_recon_weight', None)
-        if not pre_epochs or pre_w is None:
-            return None
-
-        # On the first epoch, log dynamics parameter names for verification
-        if self.current_epoch == 0:
-            try:
-                dyn = self.model.kalman_filter.dynamics
-                names = [n for n, _ in dyn.named_parameters()]
-                # write a compact string to the logger for later inspection
-                try:
-                    self.log('debug/dynamics_param_names', '|'.join(names), prog_bar=False)
-                except Exception:
-                    pass
-            except Exception:
-                pass
-
-        if self.current_epoch < pre_epochs:
-            # scale down reconstruction term
-            self.model.config.recon_weight = pre_w
-
-            # freeze dynamics network except A/B/C
-            try:
-                dyn = self.model.kalman_filter.dynamics
-                for name, p in dyn.named_parameters():
-                    base = name.split('.')[-1]
-                    if base in ('A', 'B', 'C'):
-                        p.requires_grad = True
-                    else:
-                        p.requires_grad = False
-            except Exception:
-                pass
-        else:
-            # restore recon weight and unfreeze all dynamics params
-            try:
-                self.model.config.recon_weight = cfg.recon_weight
-            except Exception:
-                pass
-            try:
-                dyn = self.model.kalman_filter.dynamics
-                for _, p in dyn.named_parameters():
+        """If _freeze_vae_epochs > 0, freeze encoder+decoder params for the first epochs."""
+        n = getattr(self.cfg, '_freeze_vae_epochs', 0)
+        try:
+            if n and self.current_epoch < n:
+                # freeze encoder+decoder
+                for p in self.model.encoder.parameters():
+                    p.requires_grad = False
+                for p in self.model.decoder.parameters():
+                    p.requires_grad = False
+            else:
+                # ensure encoder+decoder are trainable after freeze period
+                for p in self.model.encoder.parameters():
                     p.requires_grad = True
-            except Exception:
-                pass
-
-        return None
+                for p in self.model.decoder.parameters():
+                    p.requires_grad = True
+        except Exception:
+            # don't block training if freeze logic fails
+            pass
 
     def validation_step(self, batch, batch_idx):
         # support datasets that return either tensors (TensorDataset) or dicts
@@ -211,7 +172,34 @@ class KVAELit(pl.LightningModule):
             self._val_loss_sum += float(losses['total_loss'])
         self._val_loss_count += 1
 
+        # log images to TensorBoard if logger supports experiment
+        logger = self.logger
+        # pytorch_lightning logger exposes experiment (tensorboard SummaryWriter)
+        if hasattr(logger, 'experiment') and self._val_orig is not None and self._val_recon is not None:
+            tb = logger.experiment
+            # self._val_orig shape: [B=1, T, C, H, W] -> remove batch dim and log frames as images
+            orig = self._val_orig.squeeze(0)  # [T, C, H, W]
+            recon = self._val_recon.squeeze(0)
+            # normalize per-frame
+            def norm(imgs: torch.Tensor) -> torch.Tensor:
+                imgs = imgs.clone()
+                mins = imgs.view(imgs.size(0), -1).min(dim=1)[0].view(-1, 1, 1, 1)
+                imgs = imgs - mins
+                m = imgs.view(imgs.size(0), -1).max(dim=1)[0].view(-1, 1, 1, 1)
+                m = m.masked_fill(m == 0, 1.0)
+                return imgs / m
+
+            orig_n = norm(orig)
+            recon_n = norm(recon)
+            tb.add_images('val/orig', orig_n, self.current_epoch)
+            tb.add_images('val/recon', recon_n, self.current_epoch)
+
+        # drop references used for image logging
+        self._val_orig = None
+        self._val_recon = None
+
         return losses['total_loss']
+
     def on_train_epoch_end(self):
         """Aggregate and log training epoch metrics (replacement for training_epoch_end)."""
         if self._train_loss_count > 0:
@@ -244,32 +232,6 @@ class KVAELit(pl.LightningModule):
         # reset validation counters
         self._val_loss_sum = 0.0
         self._val_loss_count = 0
-
-        # log images to TensorBoard if logger supports experiment
-        logger = self.logger
-        # pytorch_lightning logger exposes experiment (tensorboard SummaryWriter)
-        if hasattr(logger, 'experiment') and self._val_orig is not None and self._val_recon is not None:
-            tb = logger.experiment
-            # self._val_orig shape: [B=1, T, C, H, W] -> remove batch dim and log frames as images
-            orig = self._val_orig.squeeze(0)  # [T, C, H, W]
-            recon = self._val_recon.squeeze(0)
-            # normalize per-frame
-            def norm(imgs: torch.Tensor) -> torch.Tensor:
-                imgs = imgs.clone()
-                mins = imgs.view(imgs.size(0), -1).min(dim=1)[0].view(-1, 1, 1, 1)
-                imgs = imgs - mins
-                m = imgs.view(imgs.size(0), -1).max(dim=1)[0].view(-1, 1, 1, 1)
-                m = m.masked_fill(m == 0, 1.0)
-                return imgs / m
-
-            orig_n = norm(orig)
-            recon_n = norm(recon)
-            tb.add_images('val/orig', orig_n, self.current_epoch)
-            tb.add_images('val/recon', recon_n, self.current_epoch)
-
-        # drop references used for image logging
-        self._val_orig = None
-        self._val_recon = None
 
     def configure_optimizers(self):
         opt = torch.optim.Adam(self.model.parameters(), lr=self.lr)
@@ -346,6 +308,8 @@ def main():
     p.add_argument('--T', type=int, default=10)
     p.add_argument('--gpus', type=int, default=0)
     p.add_argument('--ckpt-every', type=int, default=5)
+    p.add_argument('--pretrained-vae', type=str, default=None, help='Path to pretrained VAE checkpoint (optional)')
+    p.add_argument('--freeze-vae-epochs', type=int, default=0, help='If >0, freeze encoder+decoder for this many epochs')
     args = p.parse_args()
 
     # If a JSON config is provided, load it and override/extend CLI args
@@ -391,6 +355,15 @@ def main():
     transform_fn = build_transform(transforms_cfg)
 
     lit = KVAELit(cfg, lr=args.lr)
+     # --- load pretrained VAE weights if provided (delegated to KVAE helper) ---
+    pretrained_path = args.pretrained_vae or getattr(cfg, "pretrained_vae", None)
+    if pretrained_path:
+        ok = lit.model.load_vae_checkpoint(pretrained_path, map_location="cpu", strict=False)
+        if ok:
+            print(f"Loaded pretrained VAE weights from {pretrained_path}")
+        else:
+            print(f"Warning: failed to load pretrained VAE weights from {pretrained_path}")
+        
     dm = KVAEDataModule(cfg, batch_size=args.batch_size, num_seq=args.num_seq, T=args.T,
                         dataset_type=ds_type, dataset_path=ds_path, dataset_kwargs=ds_kwargs,
                         transform_fn=transform_fn)
