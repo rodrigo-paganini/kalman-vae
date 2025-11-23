@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 
-from typing import Tuple
+from typing import Tuple, Optional
 
 @dataclass
 class KVAEConfig:
@@ -35,8 +35,11 @@ class KVAEConfig:
     # Training parameters
     recon_weight: float = 0.3
     # Pretraining: scale reconstruction and number of epochs to pretrain
-    pretrain_recon_weight: float = 0.3
-    pretrain_epochs: int = 5
+    # pretrain_recon_weight: float = 0.3
+    # pretrain_epochs: int = 5
+    pretrained_vae: Optional[str] = 'runs\\20251117-203627\\checkpoints\\vae-ckpt-epoch=19.ckpt'
+    # If >0, freeze encoder+decoder for this many epochs before finetuning whole KVAE
+    _freeze_vae_epochs: int = 0
     # Gradient clipping threshold (L2 norm). Use a large value to disable.
     grad_clip_norm: float = 1.0
     

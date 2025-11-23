@@ -102,6 +102,60 @@ class KVAE(nn.Module):
         
         return x_recon
     
+    def load_vae_checkpoint(self, path: str, map_location: str = "cpu", strict: bool = False) -> bool:
+        """
+        Load pretrained VAE encoder/decoder weights from `path`.
+        Accepts Lightning-style checkpoints (dict with 'state_dict') or plain state_dict.
+        Loads any keys containing 'encoder.' into self.vae.encoder and
+        'decoder.' into self.vae.decoder when possible.
+        Returns True on (partial) success, False otherwise.
+        """
+        import os
+        import torch
+
+        if not path:
+            return False
+        if not os.path.exists(path):
+            return False
+
+        ckpt = torch.load(path, map_location=map_location)
+        state = ckpt.get("state_dict", ckpt) if isinstance(ckpt, dict) else ckpt
+
+        # collect encoder/decoder prefixed keys (robust to prefixes like 'model.encoder.')
+        enc = {k.split("encoder.", 1)[-1]: v for k, v in state.items() if "encoder." in k}
+        dec = {k.split("decoder.", 1)[-1]: v for k, v in state.items() if "decoder." in k}
+
+        loaded_any = False
+        try:
+            if hasattr(self, "vae"):
+                if enc:
+                    try:
+                        self.vae.encoder.load_state_dict(enc, strict=strict)
+                        loaded_any = True
+                    except Exception:
+                        # fallback non-strict
+                        self.vae.encoder.load_state_dict(enc, strict=False)
+                        loaded_any = True
+                if dec:
+                    try:
+                        self.vae.decoder.load_state_dict(dec, strict=strict)
+                        loaded_any = True
+                    except Exception:
+                        self.vae.decoder.load_state_dict(dec, strict=False)
+                        loaded_any = True
+
+                # If nothing matched encoder/decoder keys, try load whole dict non-strict
+                if not (enc or dec):
+                    try:
+                        self.load_state_dict(state, strict=False)
+                        loaded_any = True
+                    except Exception:
+                        loaded_any = False
+        except Exception:
+            loaded_any = False
+
+        return bool(loaded_any)
+    
     def forward(self, x: torch.Tensor, u: Optional[torch.Tensor] = None,
                 use_smoothing: bool = True) -> Dict:
         """
@@ -181,21 +235,12 @@ class KVAE(nn.Module):
         x_var = torch.tensor(self.config.noise_pixel_var, device=x.device, dtype=x_mu.dtype)    
         Sigmas_smooth = torch.eye(self.z_dim).unsqueeze(0).unsqueeze(0).repeat(batch_size, T, 1, 1).to(x.device)
         
-        #_, _, C_t = self.lgssm.get_matrices(alpha)
-        
-        #a_pred = torch.bmm(C_t.view(-1, C_t.shape[-2], C_t.shape[-1]),
-        #                  z_mean.view(-1, z_mean.shape[-1], 1)).squeeze(-1)
-        #a_pred = a_pred.view(batch_size, T, -1)
-        
-        # KL term (simplified)
-        #kl_loss = -0.5 * torch.sum(1 + a_logvar - a_mu.pow(2) - a_logvar.exp())
-        #kl_loss = kl_loss / batch_size
         vae_total, recon, kl = vae_loss(x, x_mu, x_var, a, a_mu, a_logvar, scale_reconstruction=self.config.scale_reconstruction)
-        if self.config.recon_weight:
-            recon = recon * self.config.recon_weight
-        recon = recon / batch_size * (batch_size * T * img_elements) # check if congig.recon_weight exists or is the same of scale_reconstruction
-        kl = kl / (batch_size * T * self.a_dim)
-        vae_total = recon + kl
+        # if self.config.recon_weight:
+        #     recon = recon * self.config.recon_weight
+        # recon = recon / batch_size * (batch_size * T * img_elements) # check if congig.recon_weight exists or is the same of scale_reconstruction
+        # kl = kl / (batch_size * T * self.a_dim)
+        # vae_total = recon + kl
 
         u = outputs['u']
         A_list, B_list, C_list = outputs['alpha']
@@ -204,15 +249,15 @@ class KVAE(nn.Module):
         # corrupt the autograd graph for `a` (this avoids the
         # "variable needed for gradient computation has been modified"
         # RuntimeError).
-        elbo_kf = self.kalman_filter.elbo(z_mean, Sigmas_smooth, a.clone(), u, A_list, B_list, C_list)
-        elbo_kf = elbo_kf / (batch_size * T)
+        elbo_kf = self.kalman_filter.elbo(z_mean, Sigmas_smooth, a, u, A_list, B_list, C_list)
+        #elbo_kf = elbo_kf / (batch_size * T)
         # Total loss
         # vae_total = recon * scale_reconstruction + kl
         # vae_total = -log_px_given_a*scale_reconstruction + log_qa_given_x
-        elbo_total = elbo_kf - vae_total 
+        total_loss = -elbo_kf + vae_total 
         
         return {
-            'total_loss': elbo_total,
+            'total_loss': total_loss,
             'recon_vae_loss': recon,
             'kl_vae_loss': kl,
             'elbo_kf': elbo_kf,
