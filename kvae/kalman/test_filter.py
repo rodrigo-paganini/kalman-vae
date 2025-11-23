@@ -2,7 +2,7 @@ import numpy as np
 import torch
 import matplotlib.pyplot as plt
 from kalman_filter import KalmanFilter
-from model.lstm import DynamicsParameter
+from kvae.model.lstm import DynamicsParameter
 
 # ----- Rocket example - Simple Kalman filter  -----
 dt = 0.1
