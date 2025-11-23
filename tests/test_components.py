@@ -1,8 +1,7 @@
 from kvae.model.model import KVAE
-from kvae.model.vae import Encoder, Decoder
-from kvae.model.lgssm import LGSSM
+from kvae.vae.vae import Encoder, Decoder
 from kvae.kalman.dyn_param import DynamicsParameterNetwork
-from kvae.model.config import KVAEConfig
+from kvae.vae.config import KVAEConfig
 import torch
 import torch.nn.functional as F
 

@@ -2,7 +2,7 @@
 from sympy import denom
 import torch
 
-from kvae.model.config import KVAEConfig
+from kvae.vae.config import KVAEConfig
 
 const_log_pdf = torch.tensor(- 0.5) * torch.log(torch.tensor(2) * torch.pi)
 

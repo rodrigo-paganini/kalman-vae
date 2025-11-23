@@ -1,7 +1,7 @@
 import torch
 import torch.nn.functional as F
-from kvae.model.config import KVAEConfig
-from kvae.model.vae import VAE
+from kvae.vae.config import KVAEConfig
+from kvae.vae.vae import VAE
 
 
 def _make_dummy_batch(cfg, B=2, T=4):

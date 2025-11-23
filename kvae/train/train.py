@@ -1,29 +1,27 @@
 #Minimal KVAE training loop using plain PyTorch.
-from __future__ import annotations
+import numpy as np
 
-import json
+import yaml
 import sys
 from pathlib import Path
-from typing import Optional
 import matplotlib.pyplot as plt
 
-import numpy as np
 import torch
 from torch.utils.data import DataLoader, random_split
-import yaml
 
 ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from kvae.model.config import KVAEConfig
+from kvae.vae.config import KVAEConfig
 from kvae.model.model import KVAE
-from kvae.data_loading.dataloader import make_toy_dataset
-from kvae.data_loading.pymunk_dataset import PymunkNPZDataset
+from kvae.dataloader.pymunk_dataset import PymunkNPZDataset
 
 import imageio
 import numpy as np
 
+
+# ============= TESTING  =============
 def _pad_to_block(x: np.ndarray, block: int = 16) -> np.ndarray:
     """Pad H/W to the next multiple of `block` for video codecs."""
     if x.ndim != 4:
@@ -74,131 +72,62 @@ def save_frames(x, filename, fps=10):
     print(f"Saved video to {filename}")
 
 
+def reconstruct_and_save(
+    model: KVAE,
+    loader: DataLoader,
+    device: torch.device,
+    out_dir: Path,
+    prefix: str = "vae",
+) -> None:
+    model.eval()
+    out_dir.mkdir(parents=True, exist_ok=True)
 
-def load_config(path: Optional[str]) -> dict:
-    """Load a YAML/JSON config if it exists; otherwise return an empty dict."""
-    if not path:
-        return {}
+    # Take the first batch from the *validation* loader
+    batch = next(iter(loader))
+    x = batch["images"].float().to(device)  # (B, T, C, H, W)
+
+    with torch.no_grad():
+        model.kalman_filter.dyn_params.reset_state()
+        outputs = model(x)
+        x_recon = outputs["x_recon"]      # (B, T, C, H, W)
+
+    # Use only the first sequence in the batch
+    x_true_seq = x[0].detach().cpu().numpy()       # (T, C, H, W)
+    x_recon_seq = x_recon[0].detach().cpu().numpy()
+
+    # Convert (T, C, H, W) -> (T, H, W, C)
+    if x_true_seq.ndim == 4:
+        x_true_seq = np.transpose(x_true_seq, (0, 2, 3, 1))
+    if x_recon_seq.ndim == 4:
+        x_recon_seq = np.transpose(x_recon_seq, (0, 2, 3, 1))
+
+    save_frames(x_true_seq,  str(out_dir / f"{prefix}_true.mp4"))
+    save_frames(x_recon_seq, str(out_dir / f"{prefix}_recon.mp4"))
+
+# ======================================================================
+
+def load_config(path):
+    if path is None: return {}
     p = Path(path)
-    if not p.exists():
-        return {}
-    with p.open("r") as f:
-        if p.suffix.lower() in (".yml", ".yaml"):
-            return yaml.safe_load(f) or {}
-        return json.load(f)
+    if not p.exists(): return {}
+    return yaml.safe_load(p.read_text()) or {}
 
 
-def resolve_device(preference: str) -> torch.device:
-    """Pick a device based on preference ('auto'|'cpu'|'cuda'|'mps')."""
-    pref = (preference or "auto").lower()
-    if pref == "cpu":
-        return torch.device("cpu")
-    if pref in ("cuda", "gpu") and torch.cuda.is_available():
-        return torch.device("cuda")
-    try:
-        mps_available = hasattr(torch.backends, "mps") and torch.backends.mps.is_available()
-    except Exception:
-        mps_available = False
-    if pref == "mps" and mps_available:
-        return torch.device("mps")
-    if pref == "auto":
-        if torch.cuda.is_available():
-            return torch.device("cuda")
-        if mps_available:
-            return torch.device("mps")
-    return torch.device("cpu")
-
-
-def extract_images(batch) -> torch.Tensor:
-    """Handle batch formats from different datasets and return the image tensor."""
-    if isinstance(batch, dict):
-        x = batch.get("images")
-    elif isinstance(batch, (list, tuple)):
-        x = batch[0]
-    else:
-        x = batch
-    if x is None:
-        raise ValueError("Batch does not contain images")
-    return x
-
-
-def build_dataloaders(
-    cfg: KVAEConfig,
-    dataset_cfg: dict,
-    batch_size: int,
-    num_seq: int,
-    T: int,
-) -> tuple[DataLoader, DataLoader]:
-    """Create train/val dataloaders for either the toy or pymunk dataset."""
-    ds_type = (dataset_cfg.get("type") if dataset_cfg else None) or "toy"
-    ds_kwargs = (dataset_cfg.get("kwargs") if dataset_cfg else None) or {}
-    ds_path = dataset_cfg.get("path") if dataset_cfg else None
-
-    if ds_type == "toy":
-        dataset = make_toy_dataset(num_seq=num_seq, T=T, C=cfg.img_channels, H=cfg.img_size, W=cfg.img_size)
-    elif ds_type == "pymunk":
-        if not ds_path:
-            raise ValueError("dataset.path must be set when using the pymunk dataset")
-        dataset = PymunkNPZDataset.from_npz(ds_path, seq_len=T, **ds_kwargs)
-    else:
-        raise ValueError(f"Unknown dataset type: {ds_type}")
+def build_dataloaders(ds_path, batch_size, T):
+    """
+    Create train/val dataloaders using the PymunkNPZDataset.
+    Expects dataset_cfg["path"] to point to the .npz file.
+    """
+    # seq_len=T defines how many frames per sequence
+    dataset = PymunkNPZDataset.from_npz(ds_path, seq_len=T)
 
     n_val = max(1, int(0.2 * len(dataset)))
     n_train = len(dataset) - n_val
     train_ds, val_ds = random_split(dataset, [n_train, n_val])
 
     train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True)
-    val_loader = DataLoader(val_ds, batch_size=batch_size)
+    val_loader   = DataLoader(val_ds, batch_size=batch_size, shuffle=False)
     return train_loader, val_loader
-
-
-def maybe_add_noise(x: torch.Tensor, noise_std: float) -> torch.Tensor:
-    if noise_std <= 0:
-        return x
-    return x + torch.randn_like(x) * noise_std
-
-
-def preprocess_batch(batch, device: torch.device, noise_std: float):
-    """Move batch to device and apply optional noise in one place."""
-    if isinstance(batch, dict):
-        data = {}
-        for k, v in batch.items():
-            if torch.is_tensor(v):
-                data[k] = v.to(device)
-            else:
-                data[k] = v
-        imgs = data.get("images")
-        if imgs is None:
-            raise ValueError("Batch does not contain images")
-        imgs = maybe_add_noise(imgs.float(), noise_std)
-        data["images"] = imgs
-        return data
-
-    if isinstance(batch, (list, tuple)):
-        imgs = maybe_add_noise(batch[0].float(), noise_std).to(device)
-        rest = [b.to(device) if torch.is_tensor(b) else b for b in batch[1:]]
-        return (imgs, *rest)
-
-    if torch.is_tensor(batch):
-        return maybe_add_noise(batch.float(), noise_std).to(device)
-
-    raise TypeError(f"Unsupported batch type: {type(batch)}")
-
-
-class PreprocessedLoader:
-    """Wrapper that applies preprocessing to each batch."""
-
-    def __init__(self, loader, device: torch.device, noise_std: float):
-        self.loader = loader
-        self.device = device
-        self.noise_std = noise_std
-
-    def __iter__(self):
-        for batch in self.loader:
-            yield preprocess_batch(batch, self.device, self.noise_std)
-
-    def __len__(self):
-        return len(self.loader)
 
 
 def train_one_epoch(model, loader, optimizer, device, grad_clip_norm):
@@ -209,7 +138,7 @@ def train_one_epoch(model, loader, optimizer, device, grad_clip_norm):
         model.kalman_filter.dyn_params.reset_state()
 
         # Get data
-        x = extract_images(batch).to(device)
+        x = batch["images"].float().to(device)
 
         # Forward + loss
         optimizer.zero_grad(set_to_none=True)
@@ -234,22 +163,21 @@ def train_one_epoch(model, loader, optimizer, device, grad_clip_norm):
 
 
 @torch.no_grad()
-def evaluate(model: KVAE, loader: DataLoader, device: torch.device) -> float:
+def evaluate(model, loader, device):
     model.eval()
     total = 0.0
     for batch in loader:
         model.kalman_filter.dyn_params.reset_state()
 
-        x = extract_images(batch).to(device)
+        x = batch["images"].float().to(device)   
         outputs = model(x)
-        losses = model.compute_loss(x, outputs)
-        loss = losses['loss']
+        loss = model.compute_loss(x, outputs)["loss"]
         total += float(loss.detach().cpu())
 
     return total / max(len(loader), 1)
 
 
-def save_checkpoint(path: Path, model: KVAE, optimizer: torch.optim.Optimizer, epoch: int, train_loss: float, val_loss: float) -> None:
+def save_checkpoint(path, model, optimizer, epoch, train_loss, val_loss):
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
         "epoch": epoch,
@@ -261,82 +189,24 @@ def save_checkpoint(path: Path, model: KVAE, optimizer: torch.optim.Optimizer, e
     torch.save(payload, path)
 
 
-def reconstruct_and_save(
-    model: KVAE,
-    loader: DataLoader,
-    device: torch.device,
-    out_dir: Path,
-    prefix: str = "vae",
-) -> None:
-    model.eval()
-    out_dir.mkdir(parents=True, exist_ok=True)
+if __name__ == "__main__":
 
-    # Take the first batch from the *validation* loader
-    batch = next(iter(loader))
-    x = extract_images(batch).to(device)  # (B, T, C, H, W)
-
-    with torch.no_grad():
-        model.kalman_filter.dyn_params.reset_state()
-        outputs = model(x)
-        x_recon = outputs["x_recon"]      # (B, T, C, H, W)
-
-    # Use only the first sequence in the batch
-    x_true_seq = x[0].detach().cpu().numpy()       # (T, C, H, W)
-    x_recon_seq = x_recon[0].detach().cpu().numpy()
-
-    # Convert (T, C, H, W) -> (T, H, W, C)
-    if x_true_seq.ndim == 4:
-        x_true_seq = np.transpose(x_true_seq, (0, 2, 3, 1))
-    if x_recon_seq.ndim == 4:
-        x_recon_seq = np.transpose(x_recon_seq, (0, 2, 3, 1))
-
-    save_frames(x_true_seq,  str(out_dir / f"{prefix}_true.mp4"))
-    save_frames(x_recon_seq, str(out_dir / f"{prefix}_recon.mp4"))
-
-
-def main():
     # Core settings live right here; adjust to taste.
     max_epochs = 20
     batch_size = 16
     lr = 1e-3
     ckpt_every = 0
     logdir = "runs"
-    device_pref = "auto"
-    num_seq = 200
+    device = "cpu"
     T = 10
-    noise_std = 0.0
-
-    def override(base, section, key, cast=None):
-        if key not in section:
-            return base
-        val = section[key]
-        return cast(val) if cast else val
-
-    # Optional config file overrides
-    config = load_config(ROOT / "kvae/train/config.yaml")
-    training_cfg = (config or {}).get("training", {})
-    dataset_cfg = (config or {}).get("dataset", {})
-    transforms_cfg = (config or {}).get("transforms", {})
-
-    max_epochs = override(max_epochs, training_cfg, "max_epochs", int)
-    batch_size = override(batch_size, training_cfg, "batch_size", int)
-    lr = override(lr, training_cfg, "lr", float)
-    ckpt_every = override(ckpt_every, training_cfg, "ckpt_every", int)
-    logdir = override(logdir, training_cfg, "logdir")
-    device_pref = override(device_pref, training_cfg, "device")
-    num_seq = override(num_seq, dataset_cfg, "num_seq", int)
-    T = override(T, dataset_cfg, "T", int)
-    T = override(T, dataset_cfg, "seq_len", int)  # accept either name
-    noise_std = override(noise_std, transforms_cfg, "add_noise_std", float)
 
     cfg = KVAEConfig()
-    device = resolve_device(device_pref)
     print(f"Using device: {device}")
 
-    raw_train_loader, raw_val_loader = build_dataloaders(cfg, dataset_cfg, batch_size=batch_size, num_seq=num_seq, T=T)
-    train_loader = PreprocessedLoader(raw_train_loader, device, noise_std)
-    val_loader = PreprocessedLoader(raw_val_loader, device, noise_std)
+    pathfile_videos = "/home/daniel/Documents/MVA/PGM/box.npz"
+    train_loader, val_loader = build_dataloaders(pathfile_videos, batch_size=batch_size, T=T)
 
+    # DEBUG
     # # Plot a sample batch
     # sample_batch = next(iter(train_loader))
     # sample_images = extract_images(sample_batch)
@@ -373,10 +243,5 @@ def main():
                 ckpt_path = ckpt_dir / f"epoch-{epoch:03d}.pt"
                 save_checkpoint(ckpt_path, model, optimizer, epoch, train_loss, val_loss)
 
-
         out_dir = Path(logdir) if logdir else Path(".")
-        reconstruct_and_save(model, val_loader, device, out_dir, prefix="vae")
-
-
-if __name__ == "__main__":
-    main()
+        reconstruct_and_save(model, val_loader, device, out_dir, prefix=f"vae_epoch{epoch:03d}")

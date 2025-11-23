@@ -1,10 +1,10 @@
 from torch import nn
 import torch
 
-from kvae.model.vae import Encoder, Decoder
+from kvae.vae.vae import Encoder, Decoder
 from kvae.kalman.kalman_filter import KalmanFilter
 from kvae.kalman.dyn_param import DynamicsParameter
-from kvae.utils.losses import vae_loss
+from kvae.vae.losses import vae_loss
 
 
 class KVAE(nn.Module):

@@ -18,6 +18,12 @@ import os
 import shutil
 from typing import Optional, Callable
 from dataclasses import dataclass
+from pathlib import Path
+import sys
+
+ROOT = Path(__file__).resolve().parents[2]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 import torch
 import pytorch_lightning as pl
@@ -25,11 +31,11 @@ from pytorch_lightning.loggers import TensorBoardLogger
 from pytorch_lightning.callbacks import ModelCheckpoint
 from torch.utils.data import DataLoader, random_split
 
-from kvae.model.config import KVAEConfig
-from kvae.model.vae import VAE
+from kvae.vae.config import KVAEConfig
+from kvae.vae.vae import VAE
 from kvae.data_loading.dataloader import make_toy_dataset
 from kvae.data_loading.pymunk_dataset import PymunkNPZDataset
-from kvae.utils.losses import vae_loss
+from kvae.vae.losses import vae_loss
 
 @dataclass
 class TrainingConfig:

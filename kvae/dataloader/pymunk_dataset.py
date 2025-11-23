@@ -16,7 +16,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 import numpy as np
 import torch
 
-from kvae.data_loading.base import BaseDataset
+from kvae.dataloader.base import BaseDataset
 
 
 class PymunkBaseDataset(BaseDataset):
