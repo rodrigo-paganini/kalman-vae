@@ -36,15 +36,16 @@ class PymunkBaseDataset(BaseDataset):
     def load(self):
         if not self.path.exists():
             raise FileNotFoundError(f"NPZ file not found: {self.path}")
-        # Use numpy.load; allow_pickle to be safe for object arrays
-        self.npz = np.load(self.path, allow_pickle=True)
-        # copy into raw if requested
+
         if self.load_in_memory:
-            for k in self.npz.files:
-                self.raw[k] = self.npz[k]
+            # Open, copy everything into RAM, then close
+            with np.load(self.path, allow_pickle=True) as npz:
+                self.raw = {k: npz[k].copy() for k in npz.files}
+            self.npz = None  # just to be explicit
         else:
-            # keep the NpzFile-like object for lazy access
-            self.raw = {k: self.npz[k] for k in self.npz.files}
+            # Lazy mode: don't open here (see Option B below)
+            self.raw = None
+            self.npz = None
 
 
 class PymunkNPZDataset(PymunkBaseDataset):

@@ -1,6 +1,6 @@
 #Minimal KVAE training loop using plain PyTorch.
 import numpy as np
-
+from tqdm import tqdm
 import yaml
 import sys
 from pathlib import Path
@@ -115,19 +115,29 @@ def load_config(path):
 
 
 def build_dataloaders(ds_path, batch_size, T):
-    """
-    Create train/val dataloaders using the PymunkNPZDataset.
-    Expects dataset_cfg["path"] to point to the .npz file.
-    """
-    # seq_len=T defines how many frames per sequence
-    dataset = PymunkNPZDataset.from_npz(ds_path, seq_len=T)
+    ds_path = str(Path(ds_path).resolve()) 
+    dataset = PymunkNPZDataset.from_npz(ds_path, seq_len=T, load_in_memory=True, normalize=False)
 
     n_val = max(1, int(0.2 * len(dataset)))
     n_train = len(dataset) - n_val
     train_ds, val_ds = random_split(dataset, [n_train, n_val])
 
-    train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True)
-    val_loader   = DataLoader(val_ds, batch_size=batch_size, shuffle=False)
+    train_loader = DataLoader(
+        train_ds,
+        batch_size=batch_size,
+        shuffle=True,
+        num_workers=6,         
+        pin_memory=True,
+        persistent_workers=False, 
+    )
+    val_loader = DataLoader(
+        val_ds,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=2,
+        pin_memory=True,
+        persistent_workers=False,
+    )
     return train_loader, val_loader
 
 
@@ -162,9 +172,9 @@ def train_one_epoch(model, loader, optimizer, device, grad_clip_norm):
         optimizer.step()
 
         # Accumulate for epoch averages
-        total_loss += float(loss.detach().cpu())
-        total_kf   += float(elbo_kf.detach().cpu())
-        total_vae  += float(elbo_vae_tot.detach().cpu())
+        total_loss += float(loss.detach())
+        total_kf   += float(elbo_kf.detach())
+        total_vae  += float(elbo_vae_tot.detach())
         n_batches  += 1
 
     denom = max(n_batches, 1)
@@ -194,9 +204,9 @@ def evaluate(model, loader, device):
         elbo_kf       = losses["elbo_kf"]
         elbo_vae_tot  = losses["elbo_vae_total"]
 
-        total_loss += float(loss.detach().cpu())
-        total_kf   += float(elbo_kf.detach().cpu())
-        total_vae  += float(elbo_vae_tot.detach().cpu())
+        total_loss += loss.detach()
+        total_kf   += elbo_kf.detach()
+        total_vae  += elbo_vae_tot.detach()
         n_batches  += 1
 
     denom = max(n_batches, 1)
@@ -227,18 +237,18 @@ def set_kalman_trainable(model, trainable):
 if __name__ == "__main__":
     # Core settings live right here; adjust to taste.
     max_epochs = 50
-    batch_size = 16
+    batch_size = 50
     lr = 7e-3
     ckpt_every = 0
     logdir = "runs"
-    device = "cpu"
+    device = "cuda" if torch.cuda.is_available() else "cpu"
     warmup_alpha_epochs = 5
-    T = 10
+    T = 20
 
     cfg = KVAEConfig()
     print(f"Using device: {device}")
 
-    pathfile_videos = "/home/daniel/Documents/MVA/PGM/box.npz"
+    pathfile_videos = "box.npz"
     train_loader, val_loader = build_dataloaders(pathfile_videos, batch_size=batch_size, T=T)
 
     # DEBUG
@@ -262,11 +272,11 @@ if __name__ == "__main__":
     best_val = float("inf")
     ckpt_dir = Path(logdir) if logdir else None
 
-    for epoch in range(1, max_epochs + 1):
+    for epoch in tqdm(range(1, max_epochs + 1), desc="Training epochs"):
         # Freeze alpha during the first few epochs
-        train_alpha = epoch > warmup_alpha_epochs
-        if epoch == warmup_alpha_epochs + 1: print("Unfreezing alpha for training")
-        set_kalman_trainable(model, train_alpha)
+        # train_alpha = epoch > warmup_alpha_epochs
+        # if epoch == warmup_alpha_epochs + 1: print("Unfreezing alpha for training")
+        # set_kalman_trainable(model, train_alpha)
     
         train_metrics = train_one_epoch(model, train_loader, optimizer, device, cfg.grad_clip_norm)
         val_metrics   = evaluate(model, val_loader, device)

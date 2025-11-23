@@ -247,15 +247,17 @@ class KalmanFilter(nn.Module):
         Az  = A_list[:, 1:] @ z_tprev   # [B,T-1,n,1]
         Bu  = B_list[:, 1:] @ u_t       # [B,T-1,n,1]
         
+        zero_n = torch.zeros(self.n, device=dev, dtype=dtp)
+        zero_p = torch.zeros(self.p, device=dev, dtype=dtp)
         mu_trans = (Az + Bu).squeeze(-1)  # [B,T-1,n]
         # TODO: why trick with z_t_transition - mu_transition? 
-        mvn_trans = MultivariateNormal(torch.zeros(self.n), self.Q)
+        mvn_trans = MultivariateNormal(zero_n, self.Q)
         # [B,T-1]
         log_prob_trans = mvn_trans.log_prob((z_t - mu_trans).squeeze(-1)) 
 
         # Emission likelihood - prod_{t=1}^T p(y_t|z_t) [B,T,p]
         mu_emiss = (C_list @ z_t_samp.unsqueeze(-1)).squeeze(-1)  # [B,T,p]  
-        mvn_emiss = MultivariateNormal(torch.zeros(self.p), self.R)
+        mvn_emiss = MultivariateNormal(zero_p, self.R)
         log_prob_emiss = mvn_emiss.log_prob(y_t - mu_emiss) # [B,T]
 
         # Initial term [B]
