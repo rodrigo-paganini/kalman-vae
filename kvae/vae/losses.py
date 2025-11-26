@@ -1,10 +1,10 @@
 
-from sympy import denom
 import torch
+import torch.nn.functional as F
 
 from kvae.vae.config import KVAEConfig
+import math
 
-const_log_pdf = torch.tensor(- 0.5) * torch.log(torch.tensor(2) * torch.pi)
 
 def log_gaussian(x: torch.Tensor, mean: torch.Tensor, var: torch.Tensor) -> torch.Tensor:
     """
@@ -17,6 +17,7 @@ def log_gaussian(x: torch.Tensor, mean: torch.Tensor, var: torch.Tensor) -> torc
     Returns:
         log_pdf: Tensor of shape [...] with log probabilities
     """
+    const_log_pdf = -0.5 * torch.log(torch.tensor(2.0 * torch.pi, device=x.device, dtype=x.dtype))
     return const_log_pdf - torch.log(var) / 2 - torch.square(x - mean) / (2 * var)
 
 def log_likelihood(
@@ -53,46 +54,24 @@ def log_likelihood(
     return log_px_given_a, log_qa_given_x
 
 def vae_loss(
-        x: torch.Tensor,
-        x_mu: torch.Tensor,
-        x_var: torch.Tensor,
-        a: torch.Tensor,
-        a_mu: torch.Tensor,
-        a_var: torch.Tensor,
-        scale_reconstruction: float = 0.3,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """
-    Compute VAE loss components.
-
-    Args:
-        x: Original input image sequences [batch, seq_len, channels, height, width]
-        x_mu: Reconstructed image means [batch, seq_len, channels, height, width
-        x_var: Reconstructed image variances [batch, seq_len, channels, height, width]
-        a: Sampled latent encodings [batch, seq_len, a_dim]
-        a_mu: Latent means [batch, seq_len, a_dim]
-        a_var: Latent variances [batch, seq_len, a_dim]
-        scale_reconstruction: Scaling factor for reconstruction loss. Defaults to 0.3.
-
-    Returns:
-        total: Total VAE loss.
-        recon: Reconstruction loss term.
-        kl: KL divergence loss.
-    """
+    x: torch.Tensor,
+    x_mu: torch.Tensor,
+    x_var: torch.Tensor,
+    a: torch.Tensor,
+    a_mu: torch.Tensor,
+    a_var: torch.Tensor,
+    scale_reconstruction: float = 0.3,
+):
     B, T, C, H, W = x.shape
-    num_pixels = C * H * W
-    denom = B * T * num_pixels # normalize to per (B*T*pixels)
+    denom = B * T
 
     log_px_given_a, log_qa_given_x = log_likelihood(x, x_mu, x_var, a, a_mu, a_var)
 
-    # Normalize 
-    log_px_bt = log_px_given_a / denom
-    log_qa_bt = log_qa_given_x / denom
+    # Normalized terms 
+    recon   = -scale_reconstruction * (log_px_given_a / denom)
+    entropy = - (log_qa_given_x / denom)
 
-    # Positive losses
-    recon   = -log_px_bt       
-    entropy = -log_qa_bt       
-
-    # ELBO_vae = scale * log p(x|a) - log q(a|x)
-    vae_elbo = scale_reconstruction * log_px_given_a - log_qa_given_x
+    # ELBO_vae normalized the same way
+    vae_elbo = (scale_reconstruction * log_px_given_a - log_qa_given_x) / denom
 
     return vae_elbo, recon, entropy

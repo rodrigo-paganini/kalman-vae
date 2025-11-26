@@ -1,42 +1,49 @@
 from dataclasses import dataclass
-
-from typing import Tuple
+from typing import Tuple, List, Optional
 
 @dataclass
 class KVAEConfig:
-    """Configuration for KVAE model"""
-    # Data dimensions
+    # Data
     img_channels: int = 1
-    img_size: int = 32
-    
-    # Latent dimensions
-    a_dim: int = 2  # Recognition latent space
-    z_dim: int = 4  # Dynamics latent space
-    
-    # LGSSM parameters
-    num_modes: int = 3  # K in the paper
-    
-    # VAE architecture
-    encoder_channels: Tuple[int] = None
+    img_size: int = 32          # box is 32x32
+
+    # Latent dims
+    a_dim: int = 2              # dim_a
+    z_dim: int = 4              # dim_z
+
+    # LGSSM / mixture
+    num_modes: int = 3              # K
+    noise_emission: float = 0.03    # measurement noise (on a)
+    noise_transition: float = 0.08  # process noise (on z)  
+    init_cov: float = 20.0          # initial state variance 
+    init_kf_matrices: float = 0.05  # std for B,C init      
+
+    # VAE arch (conv=True, num_filters="32,32,32", filter_size=3)
+    out_distr: str = "gaussian"  # "bernoulli" or "gaussian"
+    encoder_channels: Optional[List[int]] = None
     encoder_kernel_size: int = 3
     encoder_stride: int = 2
     encoder_padding: int = 1
-    decoder_channels: Tuple[int] = None
+
+    decoder_channels: Optional[List[int]] = None
     decoder_kernel_size: int = 3
     decoder_stride: int = 2
     decoder_padding: int = 1
-    noise_emission: float = 0.03
-    noise_pixel_var: float = 0.1
-    scale_reconstruction: float = 0.3
 
-    # Dynamics network
-    dynamics_hidden_dim: int = 64
-    
-    # Training parameters
-    recon_weight: float = 0.3
-    # Gradient clipping threshold (L2 norm). Use a large value to disable.
-    grad_clip_norm: float = 1.0
-    
+    noise_pixel_var: float = 0.1
+    scale_reconstruction: float = 2  # same as TF scale_reconstruction
+
+    # Alpha / dynamics network (alpha_rnn=True, alpha_units=50)
+    dynamics_hidden_dim: int = 50      # LSTM hidden size ~ alpha_units
+
+    # Training / optimization
+    grad_clip_norm: float = 150.0      # max_grad_norm in TF
+    recon_weight: float = 0.3          # if you use it anywhere
+
+    init_lr: float = 0.007      # init_lr
+    decay_rate: float = 0.85    # decay_rate
+    decay_steps: int = 20       # decay_steps
+
     def __post_init__(self):
         if self.encoder_channels is None:
             self.encoder_channels = [32, 32, 32]

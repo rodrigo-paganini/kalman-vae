@@ -11,8 +11,6 @@ class KVAE(nn.Module):
     """
     Kalman Variational Auto-Encoder
     Combines VAE for recognition with LGSSM for dynamics modeling
-
-    TODO: Correct the implementation of this class.
     """
     
     def __init__(self, config):
@@ -27,16 +25,21 @@ class KVAE(nn.Module):
         self.K = config.num_modes
         self.z_dim = config.z_dim
         self.a_dim = config.a_dim
-        A_in = torch.randn(self.K, self.z_dim, self.z_dim) * 0.1 # TODO: why?
-        B_in = torch.randn(self.K, self.z_dim, self.z_dim) * 0.1
-        C_in = torch.randn(self.K, self.a_dim, self.z_dim) * 0.1
-        dynamics_net = DynamicsParameter(A_in, B_in, C_in)
 
-        # Kalman filter
+        A_in = torch.eye(self.z_dim).unsqueeze(0).repeat(self.K, 1, 1)  # [K, z, z]
+        A_in = A_in + torch.randn_like(A_in) * 0.01
+        init_std = config.init_kf_matrices 
+        B_in = torch.randn(self.K, self.z_dim, self.z_dim) * init_std
+        C_in = torch.randn(self.K, self.a_dim, self.z_dim) * init_std
+        dynamics_net = DynamicsParameter(A_in, B_in, C_in, hidden_lstm=config.dynamics_hidden_dim)
+
         mu0 = torch.zeros(self.z_dim, dtype=torch.float32)
-        Sigma0 = torch.diag(torch.ones(self.z_dim))
-        std_dyn = 1.0
-        std_obs = 1.0
+        Sigma0 = torch.eye(self.z_dim, dtype=torch.float32) * config.init_cov 
+
+        # Noise from config (note: config values are variances )
+        std_dyn = (config.noise_transition) ** 0.5   
+        std_obs = (config.noise_emission) ** 0.5     
+        # Kalman filter
         self.kalman_filter = KalmanFilter(std_dyn, std_obs, mu0, Sigma0, dynamics_net)
 
     
@@ -130,7 +133,7 @@ class KVAE(nn.Module):
         }
     
     
-    def compute_loss(self, x, outputs):
+    def compute_loss(self, x, outputs, kf_weight=1.0):
         batch_size, T = x.shape[:2]
 
         a      = outputs['a_samples']      # [B, T, a_dim]
@@ -169,8 +172,8 @@ class KVAE(nn.Module):
         )
 
         # Combine
-        elbo_total = elbo_kf + vae_elbo        # sum of ELBO contributions
-        loss = -elbo_total                     # minimize negative ELBO
+        elbo_total = vae_elbo + kf_weight * elbo_kf     # sum of ELBO contributions
+        loss = -elbo_total                              # minimize negative ELBO
 
         return {
             "loss": loss,

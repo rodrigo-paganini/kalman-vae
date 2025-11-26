@@ -208,6 +208,29 @@ class KalmanFilter(nn.Module):
         return torch.stack(mus_smooth, 1), torch.stack(Sigmas_smooth, 1), A_list, B_list, C_list
 
 
+    def _safe_cholesky(self, Sigma, max_tries=5, jitter_init=1e-6): #TODO: unsure 
+        dev, dtp = Sigma.device, Sigma.dtype
+        n = Sigma.size(-1)
+
+        # Force symmetry
+        Sigma = 0.5 * (Sigma + Sigma.mT)
+
+        eye = torch.eye(n, device=dev, dtype=dtp)
+        jitter = jitter_init
+        for _ in range(max_tries):
+            try:
+                L = torch.linalg.cholesky(Sigma + jitter * eye)
+                return L
+            except torch._C._LinAlgError:
+                jitter *= 10.0  # increase jitter and try again
+
+        # Final fallback: use only the (clamped) diagonal
+        diag = torch.diagonal(Sigma, dim1=-2, dim2=-1)
+        diag = torch.clamp(diag, min=1e-6)
+        L = torch.diag_embed(torch.sqrt(diag))
+        return L
+    
+
     def elbo(self, mu_t_T, Sigma_t_T, y_t, u_t, A_list, B_list, C_list):
         """
         Compute the Evidence Lower Bound (ELBO)
@@ -234,8 +257,7 @@ class KalmanFilter(nn.Module):
 
         # Sample from the smoothed distribution - to ensure positive definiteness
         dev, dtp = self.Q.device, self.Q.dtype
-        jitter = 1e-6 * torch.eye(self.n, device=dev, dtype=dtp)
-        L = torch.linalg.cholesky(Sigma_t_T + jitter) 
+        L = self._safe_cholesky(Sigma_t_T)
         mvn_smooth = MultivariateNormal(mu_t_T, scale_tril=L)
         # Sample using reparameterization trick (keep gradients) [B,T,n,1] 
         z_t_samp = mvn_smooth.rsample()
