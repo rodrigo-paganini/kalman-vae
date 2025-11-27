@@ -71,33 +71,8 @@ def build_pymunk_dataset(path: str, T: int):
     )
     return dataset
 
-def build_dataloaders(ds_path, batch_size, T):
-    ds_path = str(Path(ds_path).resolve()) 
-    dataset = PymunkNPZDataset.from_npz(ds_path, seq_len=T, load_in_memory=True, normalize=False)
 
-    n_val = max(1, int(0.2 * len(dataset)))
-    n_train = len(dataset) - n_val
-    train_ds, val_ds = random_split(dataset, [n_train, n_val])
-
-    train_loader = DataLoader(
-        train_ds,
-        batch_size=batch_size,
-        shuffle=True,
-        num_workers=6,         
-        pin_memory=True,
-        persistent_workers=False, 
-    )
-    val_loader = DataLoader(
-        val_ds,
-        batch_size=batch_size,
-        shuffle=False,
-        num_workers=2,
-        pin_memory=True,
-        persistent_workers=False,
-    )
-    return train_loader, val_loader
-
-def build_dataloaders_refactored(
+def build_dataloaders(
         dataset_cfg: dict,
         batch_size: int,
     ):

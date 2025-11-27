@@ -151,9 +151,9 @@ def main():
     cfg = KVAEConfig()
     device = parse_device(train_cfg.device)
     print(f"Using device: {device}")
-
-    pathfile_videos = config['dataset']['path']
-    train_loader, val_loader = build_dataloaders(pathfile_videos, batch_size=train_cfg.batch_size, T=train_cfg.T)
+    dataset_cfg = config['dataset']
+    
+    train_loader, val_loader = build_dataloaders(dataset_cfg, train_cfg.batch_size)
 
     model = KVAE(cfg).to(device)
 
