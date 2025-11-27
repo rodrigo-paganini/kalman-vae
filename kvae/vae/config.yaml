@@ -5,7 +5,7 @@ dataset:
   # 'toy' or 'pymunk'
   type: pymunk
   # for 'pymunk' sets path to the .npz file containing 'images' and 'state'
-  path: /home/daniel/Documents/MVA/PGM/box.npz
+  path: /Users/rodrigopaganini/master/data/pgm/kvae/box.npz
   kwargs: {}
 
 transforms:

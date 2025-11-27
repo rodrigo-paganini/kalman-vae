@@ -9,3 +9,5 @@
 
 ### Code
 - [ ] KVAE integration of kalman filter and VAE, into module `kvae/model/model.py`.
+- [ ] config file
+- [ ] tensorboard
