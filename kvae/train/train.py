@@ -186,7 +186,152 @@ def kalman_prediction_test(
     return mse_kf_avg, mse_naive_avg
 
 
-# ======================================================================
+# === IMPUTATION FUNCTIONS ===
+def mask_impute_planning(batch_size, T, t_init_mask = 4, t_steps_mask = 12, device=None):
+    """
+    Observe first t_init_mask steps, hide the next t_steps_mask steps, then observe the rest.
+    """
+    mask = torch.ones(batch_size, T, device=device)
+    t_end = t_init_mask + t_steps_mask
+    t_end = min(t_end, T)
+    mask[:, t_init_mask:t_end] = 0.0
+    return mask
+
+
+def mask_impute_random(batch_size, T, t_init_mask = 4, drop_prob = 0.5, device=None):
+    """
+    Observe first t_init_mask steps, then randomly drop later steps with probability drop_prob.
+    """
+    mask = torch.ones(batch_size, T, device=device)
+    n_steps = T - t_init_mask
+    if n_steps > 0:
+        mask[:, t_init_mask:] = torch.bernoulli(
+            torch.full((batch_size, n_steps), 1.0 - drop_prob, device=device)
+        )
+    return mask
+
+
+@torch.no_grad()
+def impute_batch(model, batch, mask, device):
+    """
+    Imputation evaluation on a single batch:
+    - uses model.impute(...) with a given mask
+    - reconstructs x from:
+        * VAE a (x_recon)
+        * smoothed a (x_imputed)
+        * filtered a (x_filtered)
+    - computes Hamming distances on unobserved frames.
+    """
+    model.eval()
+
+    x = batch["images"].float().to(device)      # [B,T,C,H,W]
+    B, T, C, H, W = x.shape
+
+    # Optional controls
+    u = batch.get("controls", None)
+    if u is not None:
+        u = u.to(device)
+
+    mask = mask.to(device)
+
+    # KVAE imputation
+    imp_out = model.impute(x, mask=mask, u=u)
+
+    x_recon    = imp_out["x_recon"]    # [B,T,C,H,W] (VAE baseline)
+    x_imputed  = imp_out["x_imputed"]  # [B,T,C,H,W] (smoothing)
+    x_filtered = imp_out["x_filtered"] # [B,T,C,H,W] (filtering)
+
+    # 1 = observed, 0 = missing -> we want missing
+    unobs = (mask < 0.5)                 # [B,T]
+    if unobs.sum() == 0:
+        return None
+
+    # Expand mask to pixelwise shape for broadcasting
+    unobs_px = unobs.view(B, T, 1, 1, 1)   # [B,T,1,1,1]
+
+    # MSE on missing frames
+    def mse_on_unobs(x_hat):
+        diff2 = (x - x_hat) ** 2
+        diff2 = diff2 * unobs_px
+        return diff2.sum().item() / unobs_px.sum().item()
+    
+
+@torch.no_grad()
+def impute_batch(model, batch, mask, device):
+    """
+    Imputation evaluation on a single batch:
+    - uses model.impute(...) with a given mask
+    - reconstructs x from:
+        * VAE a (x_recon)
+        * smoothed a (x_imputed)
+        * filtered a (x_filtered)
+    - computes Hamming distances on unobserved frames.
+    """
+    model.eval()
+
+    x = batch["images"].float().to(device)      # [B,T,C,H,W]
+    B, T, C, H, W = x.shape
+
+    # Optional controls
+    u = batch.get("controls", None)
+    if u is not None:
+        u = u.to(device)
+
+    mask = mask.to(device)
+
+    # KVAE imputation
+    imp_out = model.impute(x, mask=mask, u=u)
+
+    x_recon    = imp_out["x_recon"]    # [B,T,C,H,W] (VAE baseline)
+    x_imputed  = imp_out["x_imputed"]  # [B,T,C,H,W] (smoothing)
+    x_filtered = imp_out["x_filtered"] # [B,T,C,H,W] (filtering)
+
+    # 1 = observed, 0 = missing -> we want missing
+    unobs = (mask < 0.5)                 # [B,T]
+    if unobs.sum() == 0:
+        return None
+
+    # Expand mask to pixelwise shape for broadcasting
+    unobs_px = unobs.view(B, T, 1, 1, 1)   # [B,T,1,1,1]
+
+    # MSE on missing frames
+    def mse_on_unobs(x_hat):
+        diff2 = (x - x_hat) ** 2
+        diff2 = diff2 * unobs_px
+        return diff2.sum().item() / unobs_px.sum().item()
+    
+    # MSE on baseline (comparing random unobserved frames)
+    baseline = 0.0
+    for i in [0, min(3, T-1), min(6, T-1)]:
+        for j in [min(9, T-1), min(12, T-1), min(15, T-1)]:
+            if i >= T or j >= T:
+                continue
+
+            # Sequences where both timesteps are unobserved
+            pair_unobs = (mask[:, i] < 0.5) & (mask[:, j] < 0.5)   # [B]
+            if pair_unobs.sum() == 0:
+                continue
+
+            xi = x[pair_unobs, i]  # [B',C,H,W]
+            xj = x[pair_unobs, j]  # [B',C,H,W]
+
+            dist = ((xi - xj) ** 2).mean().item()   
+            baseline = max(baseline, dist)
+
+
+    mse_smooth   = mse_on_unobs(x_imputed)      # MSE using smoothed reconstruction
+    mse_filt     = mse_on_unobs(x_filtered)     # MSE using filtered reconstruction  
+    mse_recon    = mse_on_unobs(x_recon)        # MSE using VAE reconstruction
+
+    return {
+        "mse_smooth": mse_smooth,
+        "mse_filt":   mse_filt,
+        "mse_recon":  mse_recon,
+        "baseline":   baseline,
+    }
+
+
+# ==============================================================
 
 def load_config(path):
     if path is None: return {}
@@ -394,11 +539,9 @@ if __name__ == "__main__":
     pathfile_videos = "/home/daniel/Documents/MVA/PGM/box.npz"
     train_loader, val_loader = build_dataloaders(pathfile_videos, batch_size=batch_size, T=T)
 
-    # DEBUG
+    # # DEBUG
     # # Plot a sample batch
     # sample_batch = next(iter(train_loader))
-    # sample_images = extract_images(sample_batch)
-    # B, TT, C, H, W = sample_images.shape
     # fig, axes = plt.subplots(1, TT, figsize=(TT * 2, 2))
     # for t in range(TT):
     #     ax = axes[t]
@@ -424,6 +567,10 @@ if __name__ == "__main__":
     best_val = float("inf")
     ckpt_dir = Path(logdir) if logdir else None
 
+    GENERATE_STEP = 1         # cfg.generate_step
+    T_INIT_MASK   = 4          # cfg.t_init_mask
+    T_STEPS_MASK  = 12         # cfg.t_steps_mask
+
     for epoch in range(1, max_epochs + 1):
         if epoch <= only_vae_epochs:
             phase = "vae"
@@ -443,6 +590,31 @@ if __name__ == "__main__":
 
         train_metrics = train_one_epoch(model, train_loader, optimizer, device, cfg.grad_clip_norm, scheduler, kf_weight)        
         val_metrics   = evaluate(model, val_loader, device, kf_weight)
+
+        if (epoch % GENERATE_STEP == 0) or epoch == 1 or epoch == max_epochs:
+            # Take one batch from the validation loader
+            batch = next(iter(val_loader))
+            B, T_cur = batch["images"].shape[:2]
+
+            # Build a planning mask
+            mask_planning = mask_impute_planning(
+                batch_size=B,
+                T=T_cur,
+                t_init_mask=T_INIT_MASK,
+                t_steps_mask=T_STEPS_MASK,
+                device=device,
+            )
+
+            imp_metrics = impute_batch(model, batch, mask_planning, device)
+            if imp_metrics is not None:
+                print(
+                    f"[Epoch {epoch}] Imputation planning "
+                    f"(t_init={T_INIT_MASK}, t_steps={T_STEPS_MASK}) "
+                    f"MSE (smooth: {imp_metrics['mse_smooth']:.6f}, "
+                    f"filt: {imp_metrics['mse_filt']:.6f}, "
+                    f"recon: {imp_metrics['mse_recon']:.6f})"
+                    f" | baseline: {imp_metrics['baseline']:.6f}"
+                )
 
         train_loss = train_metrics["loss"]
         val_loss   = val_metrics["loss"]
