@@ -8,7 +8,7 @@ from dataclasses import dataclass
 import yaml
 from tqdm import tqdm
 
-from kvae.train.logging_utils import setup_logging
+from kvae.train.logging_utils import setup_logging, TensorBoardLogger
 from kvae.vae.config import KVAEConfig
 from kvae.model.model import KVAE
 from kvae.train.utils import Checkpointer, build_dataloaders, parse_config, parse_device, seed_all_modules, \
@@ -16,7 +16,7 @@ from kvae.train.utils import Checkpointer, build_dataloaders, parse_config, pars
 from kvae.train.testing import reconstruct_and_save, kalman_prediction_test
 
 
-def train_one_epoch(model, loader, optimizer, device, scheduler=None, kf_weight=1.0):
+def train_one_epoch(model, loader, optimizer, device, scheduler=None, kf_weight=1.0, tb_logger=None):
     model.train()
     total_loss = 0.0
     total_vae  = 0.0
@@ -41,6 +41,9 @@ def train_one_epoch(model, loader, optimizer, device, scheduler=None, kf_weight=
 
         loss.backward()
 
+        if tb_logger is not None:
+            tb_logger.log_metrics(losses, 'train')
+
         optimizer.step()
 
         if scheduler is not None:
@@ -52,15 +55,19 @@ def train_one_epoch(model, loader, optimizer, device, scheduler=None, kf_weight=
         n_batches  += 1
 
     denom = max(n_batches, 1)
-    return {
+    epoch_losses = {
         "loss":           total_loss / denom,
         "elbo_kf":        total_kf   / denom,
         "elbo_vae_total": total_vae  / denom,
     }
 
+    if tb_logger:
+        tb_logger.log_epoch_metrics(epoch_losses, 'train')
+
+    return epoch_losses
 
 @torch.no_grad()
-def evaluate(model, loader, device, kf_weight=1.0):
+def evaluate(model, loader, device, kf_weight=1.0, tb_logger=None):
     model.eval()
     total_loss = 0.0
     total_vae  = 0.0
@@ -83,12 +90,20 @@ def evaluate(model, loader, device, kf_weight=1.0):
         total_vae  += elbo_vae_tot.detach()
         n_batches  += 1
 
+        if tb_logger is not None:
+            tb_logger.log_metrics(losses, 'val')
+
     denom = max(n_batches, 1)
-    return {
+    epoch_losses = {
         "loss":          total_loss / denom,
         "elbo_kf":       total_kf   / denom,
         "elbo_vae_total": total_vae / denom,
     }
+
+    if tb_logger:
+        tb_logger.log_epoch_metrics(epoch_losses, 'val')
+
+    return epoch_losses
 
 
 def set_training_phase(model, phase: str):
@@ -147,26 +162,22 @@ def set_training_phase(model, phase: str):
 
 
 def main():
-    # Fix random seeds for reproducibility
     config = parse_config()
     train_cfg = TrainingConfig(**config['training'])
     runs_dir = create_runs_dir(train_cfg.logdir)
     setup_logging(str(runs_dir / "train.log"))
     logger = logging.getLogger(__name__)
+    tb_logger = TensorBoardLogger(str(runs_dir))
     logger.info("Starting training with configuration:")
     for key, value in config.items():
         logger.info(f"{key}: {value}")
-    from time import strftime, time
-    start_time = time()
-    logger.info(f"Training started at: {strftime('%Y-%m-%d %H:%M:%S')}")
 
     ckpt_dir = runs_dir / "checkpoints" if runs_dir else None
     ckpt = Checkpointer(ckpt_dir, train_cfg.ckpt_every)
     with open(runs_dir / "config.yaml", 'w') as f:
         yaml.dump(config, f)
 
-    seed_all_modules(train_cfg.seed) 
-
+    seed_all_modules(train_cfg.seed)
     cfg = KVAEConfig()
     device = parse_device(train_cfg.device)
     logger.info(f"Using device: {device}")
@@ -202,12 +213,12 @@ def main():
         if epoch == 1 or epoch == train_cfg.only_vae_epochs + 1 or epoch == train_cfg.only_vae_epochs + train_cfg.kf_update_epochs + 1:
             logger.info(f"\n=== Switched to training phase '{phase}' at epoch {epoch} ===")
 
-        train_metrics = train_one_epoch(model, train_loader, optimizer, device, scheduler, kf_weight)        
-        val_metrics   = evaluate(model, val_loader, device, kf_weight)
+        train_metrics = train_one_epoch(model, train_loader, optimizer, device, scheduler, kf_weight, tb_logger)     
+        val_metrics   = evaluate(model, val_loader, device, kf_weight, tb_logger)
 
         train_loss = train_metrics["loss"]
         val_loss   = val_metrics["loss"]
-        
+
         if train_cfg.debug:
             # Kalman prediction test
             kf_mse, mse_naive = kalman_prediction_test(model, val_loader, device, max_batches=5)
