@@ -212,7 +212,7 @@ def main():
             # Kalman prediction test
             kf_mse, mse_naive = kalman_prediction_test(model, val_loader, device, max_batches=5)
             # VAE reconstruction test
-            reconstruct_and_save(model, val_loader, device, runs_dir, prefix=f"vae_epoch{epoch:03d}")
+            reconstruct_and_save(model, val_loader, device, runs_dir / "videos", prefix=f"vae_epoch{epoch:03d}")
         # Logging
         logger.info(
             f"Epoch {epoch:03d} [phase={phase}]\n"
