@@ -8,9 +8,12 @@ import numpy as np
 import random
 import matplotlib.pyplot as plt
 import datetime
+import logging
 
 from kvae.dataloader.pymunk_dataset import PymunkNPZDataset
-from kvae.vae.train_vae import TrainingConfig
+
+
+logger = logging.getLogger(__name__)
 
 
 def parse_device(device_pref: str):
@@ -25,10 +28,10 @@ def parse_device(device_pref: str):
         else:
             device_pref = 'cpu'
     elif device_pref == 'cuda' and not cuda_available:
-        print("CUDA not available, switching to CPU.")
+        logger.warning("CUDA not available, switching to CPU.")
         device_pref = 'cpu'
     elif device_pref == 'mps' and not mps_available:
-        print("MPS not available, switching to CPU.")
+        logger.warning("MPS not available, switching to CPU.")
         device_pref = 'cpu'
 
     return torch.device(device_pref)
@@ -136,7 +139,7 @@ class Checkpointer:
         self.ckpt_every = ckpt_every
         self.best_val = float("inf")
         self.checkpoint_dir.mkdir(parents=True)
-        print(f"\nCheckpoints will be saved to: {self.checkpoint_dir}\n")
+        logger.info(f"\nCheckpoints will be saved to: {self.checkpoint_dir}\n")
 
     @staticmethod
     def payload(model, optimizer, epoch, train_loss, val_loss):
@@ -171,4 +174,4 @@ class Checkpointer:
             self.payload(model, optimizer, epoch, train_loss, val_loss),
             path
         )
-        print(f"Saved checkpoint at epoch {epoch} to {path}")
+        logger.info(f"Saved checkpoint at epoch {epoch} to {path}")

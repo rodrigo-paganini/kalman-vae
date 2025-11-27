@@ -3,8 +3,12 @@ import torch
 import imageio
 from torch.utils.data import DataLoader
 from pathlib import Path
+import logging
 
 from kvae.model.model import KVAE
+
+
+logger = logging.getLogger(__name__)
 
 
 def _pad_to_block(x, block = 16):
@@ -54,7 +58,7 @@ def save_frames(x, filename, fps=10):
 
     # imageio expects (num_frames, H, W, C)
     imageio.mimwrite(filename, x, fps=fps)
-    print(f"Saved video to {filename}")
+    logger.info(f"Saved video to {filename}")
 
 
 def reconstruct_and_save(

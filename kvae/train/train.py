@@ -1,3 +1,4 @@
+import logging
 import random
 import numpy as np
 from pathlib import Path
@@ -5,7 +6,9 @@ import torch
 import numpy as np
 from dataclasses import dataclass
 import yaml
+from tqdm import tqdm
 
+from kvae.train.logging_utils import setup_logging
 from kvae.vae.config import KVAEConfig
 from kvae.model.model import KVAE
 from kvae.train.utils import Checkpointer, build_dataloaders, parse_config, parse_device, seed_all_modules, \
@@ -20,7 +23,7 @@ def train_one_epoch(model, loader, optimizer, device, scheduler=None, kf_weight=
     total_kf   = 0.0
     n_batches  = 0
 
-    for batch in loader:
+    for batch in tqdm(loader, desc="Training"):
         # Reset Kalman LSTM state at the start of each sequence
         model.kalman_filter.dyn_params.reset_state()
 
@@ -64,7 +67,7 @@ def evaluate(model, loader, device, kf_weight=1.0):
     total_kf   = 0.0
     n_batches  = 0
 
-    for batch in loader:
+    for batch in tqdm(loader, desc="Evaluating:"):
         model.kalman_filter.dyn_params.reset_state()
 
         x = batch["images"].float().to(device)
@@ -148,6 +151,12 @@ def main():
     config = parse_config()
     train_cfg = TrainingConfig(**config['training'])
     runs_dir = create_runs_dir(train_cfg.logdir)
+    setup_logging(str(runs_dir / "train.log"))
+    logger = logging.getLogger(__name__)
+    logger.info("Starting training with configuration:")
+    for key, value in config.items():
+        logger.info(f"{key}: {value}")
+
     ckpt_dir = runs_dir / "checkpoints" if runs_dir else None
     ckpt = Checkpointer(ckpt_dir, train_cfg.ckpt_every)
     with open(runs_dir / "config.yaml", 'w') as f:
@@ -157,7 +166,7 @@ def main():
 
     cfg = KVAEConfig()
     device = parse_device(train_cfg.device)
-    print(f"Using device: {device}")
+    logger.info(f"Using device: {device}")
     dataset_cfg = config['dataset']
     
     train_loader, val_loader = build_dataloaders(dataset_cfg, train_cfg.batch_size)
@@ -187,9 +196,8 @@ def main():
 
         set_training_phase(model, phase)
 
-        # Print when phase changes
         if epoch == 1 or epoch == train_cfg.only_vae_epochs + 1 or epoch == train_cfg.only_vae_epochs + train_cfg.kf_update_epochs + 1:
-            print(f"\n=== Switched to training phase '{phase}' at epoch {epoch} ===")
+            logger.info(f"\n=== Switched to training phase '{phase}' at epoch {epoch} ===")
 
         train_metrics = train_one_epoch(model, train_loader, optimizer, device, scheduler, kf_weight)        
         val_metrics   = evaluate(model, val_loader, device, kf_weight)
@@ -200,9 +208,9 @@ def main():
         # Kalman prediction test
         kf_mse, mse_naive = kalman_prediction_test(model, val_loader, device, max_batches=5)
         # VAE reconstruction test
-        reconstruct_and_save(model, val_loader, device, Path(train_cfg.logdir), prefix=f"vae_epoch{epoch:03d}")
+        reconstruct_and_save(model, val_loader, device, runs_dir, prefix=f"vae_epoch{epoch:03d}")
         # Logging
-        print(
+        logger.info(
             f"Epoch {epoch:03d} [phase={phase}]\n"
             f"Train loss (min) {train_loss:.6f} | ELBOs (max)"
             f"(VAE {train_metrics['elbo_vae_total']:.6f}, KF {train_metrics['elbo_kf']:.6f})\n"
