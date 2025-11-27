@@ -146,24 +146,14 @@ def main():
     config = parse_config()
     train_cfg = TrainingConfig(**config['training'])
 
-    seed_all_modules(train_cfg.seed)
-
-    # Core settings 
-    max_epochs = train_cfg.max_epochs          # num_epochs
-    batch_size = train_cfg.batch_size          # batch_size
-    lr = train_cfg.lr               # init_lr
-    ckpt_every = train_cfg.ckpt_every
-    logdir = train_cfg.logdir
-    device = parse_device(train_cfg.device) #"cuda" if torch.cuda.is_available() else "cpu"
-    T = train_cfg.T
-    only_vae_epochs = train_cfg.only_vae_epochs
-    kf_update_epochs = train_cfg.kf_update_epochs   
+    seed_all_modules(train_cfg.seed) 
 
     cfg = KVAEConfig()
+    device = parse_device(train_cfg.device)
     print(f"Using device: {device}")
 
     pathfile_videos = config['dataset']['path']
-    train_loader, val_loader = build_dataloaders(pathfile_videos, batch_size=batch_size, T=T)
+    train_loader, val_loader = build_dataloaders(pathfile_videos, batch_size=train_cfg.batch_size, T=train_cfg.T)
 
     model = KVAE(cfg).to(device)
 
@@ -178,13 +168,13 @@ def main():
     )
 
     best_val = float("inf")
-    ckpt_dir = Path(logdir) if logdir else None
+    ckpt_dir = Path(train_cfg.logdir) if train_cfg.logdir else None
 
-    for epoch in range(1, max_epochs + 1):
-        if epoch <= only_vae_epochs:
+    for epoch in range(1, train_cfg.max_epochs + 1):
+        if epoch <= train_cfg.only_vae_epochs:
             phase = "vae"
             kf_weight = 0.0           
-        elif epoch <= only_vae_epochs + kf_update_epochs:
+        elif epoch <= train_cfg.only_vae_epochs + train_cfg.kf_update_epochs:
             phase = "vae_kf"
             kf_weight = 0.3           
         else:
@@ -194,7 +184,7 @@ def main():
         set_training_phase(model, phase)
 
         # Print when phase changes
-        if epoch == 1 or epoch == only_vae_epochs + 1 or epoch == only_vae_epochs + kf_update_epochs + 1:
+        if epoch == 1 or epoch == train_cfg.only_vae_epochs + 1 or epoch == train_cfg.only_vae_epochs + train_cfg.kf_update_epochs + 1:
             print(f"\n=== Switched to training phase '{phase}' at epoch {epoch} ===")
 
         train_metrics = train_one_epoch(model, train_loader, optimizer, device, scheduler, kf_weight)        
@@ -206,7 +196,7 @@ def main():
         # Kalman prediction test
         kf_mse, mse_naive = kalman_prediction_test(model, val_loader, device, max_batches=5)
         # VAE reconstruction test
-        reconstruct_and_save(model, val_loader, device, Path('./runs/'), prefix=f"vae_epoch{epoch:03d}")
+        reconstruct_and_save(model, val_loader, device, Path(train_cfg.logdir), prefix=f"vae_epoch{epoch:03d}")
         # Logging
         print(
             f"Epoch {epoch:03d} [phase={phase}]\n"
@@ -223,7 +213,7 @@ def main():
                 best_val = val_loss
                 save_checkpoint(best_path, model, optimizer, epoch, train_loss, val_loss)
 
-            if ckpt_every > 0 and epoch % ckpt_every == 0:
+            if train_cfg.ckpt_every > 0 and epoch % train_cfg.ckpt_every == 0:
                 ckpt_path = ckpt_dir / f"epoch-{epoch:03d}.pt"
                 save_checkpoint(ckpt_path, model, optimizer, epoch, train_loss, val_loss)
 
