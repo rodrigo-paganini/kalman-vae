@@ -4,10 +4,12 @@ from pathlib import Path
 import torch
 import numpy as np
 from dataclasses import dataclass
+import yaml
 
 from kvae.vae.config import KVAEConfig
 from kvae.model.model import KVAE
-from kvae.train.utils import build_dataloaders, save_checkpoint, parse_config, parse_device, seed_all_modules
+from kvae.train.utils import Checkpointer, build_dataloaders, parse_config, parse_device, seed_all_modules, \
+    create_runs_dir
 from kvae.train.testing import reconstruct_and_save, kalman_prediction_test
 
 
@@ -145,6 +147,11 @@ def main():
     # Fix random seeds for reproducibility
     config = parse_config()
     train_cfg = TrainingConfig(**config['training'])
+    runs_dir = create_runs_dir(train_cfg.logdir)
+    ckpt_dir = runs_dir / "checkpoints" if runs_dir else None
+    ckpt = Checkpointer(ckpt_dir, train_cfg.ckpt_every)
+    with open(runs_dir / "config.yaml", 'w') as f:
+        yaml.dump(config, f)
 
     seed_all_modules(train_cfg.seed) 
 
@@ -166,9 +173,6 @@ def main():
         step_size=step_size,
         gamma=cfg.decay_rate,   
     )
-
-    best_val = float("inf")
-    ckpt_dir = Path(train_cfg.logdir) if train_cfg.logdir else None
 
     for epoch in range(1, train_cfg.max_epochs + 1):
         if epoch <= train_cfg.only_vae_epochs:
@@ -208,14 +212,7 @@ def main():
         )
         # Checkpointing
         if ckpt_dir:
-            best_path = ckpt_dir / "best.pt"
-            if val_loss < best_val:
-                best_val = val_loss
-                save_checkpoint(best_path, model, optimizer, epoch, train_loss, val_loss)
-
-            if train_cfg.ckpt_every > 0 and epoch % train_cfg.ckpt_every == 0:
-                ckpt_path = ckpt_dir / f"epoch-{epoch:03d}.pt"
-                save_checkpoint(ckpt_path, model, optimizer, epoch, train_loss, val_loss)
+            ckpt.save_checkpoints(train_loss, val_loss, model, optimizer, epoch)
 
 
 @dataclass

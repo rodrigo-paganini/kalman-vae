@@ -7,6 +7,7 @@ import yaml
 import numpy as np
 import random
 import matplotlib.pyplot as plt
+import datetime
 
 from kvae.dataloader.pymunk_dataset import PymunkNPZDataset
 from kvae.vae.train_vae import TrainingConfig
@@ -115,13 +116,59 @@ def build_dataloaders(
     return train_loader, val_loader
 
 
-def save_checkpoint(path, model, optimizer, epoch, train_loss, val_loss):
-    path.parent.mkdir(parents=True, exist_ok=True)
-    payload = {
-        "epoch": epoch,
-        "model_state": model.state_dict(),
-        "optimizer_state": optimizer.state_dict(),
-        "train_loss": train_loss,
-        "val_loss": val_loss,
-    }
-    torch.save(payload, path)
+def create_runs_dir(logdir: str) -> Path:
+    if logdir is None:
+        return None
+    ts = datetime.datetime.now().strftime('%Y%m%d-%H%M%S')
+    ckpt_root = os.path.join(logdir, ts)
+    os.makedirs(ckpt_root)
+
+    return Path(ckpt_root)
+
+
+class Checkpointer:
+    def __init__(
+        self,
+        checkpoint_dir: Path,
+        ckpt_every: int
+        ):
+        self.checkpoint_dir = checkpoint_dir
+        self.ckpt_every = ckpt_every
+        self.best_val = float("inf")
+        self.checkpoint_dir.mkdir(parents=True)
+        print(f"\nCheckpoints will be saved to: {self.checkpoint_dir}\n")
+
+    @staticmethod
+    def payload(model, optimizer, epoch, train_loss, val_loss):
+        return {
+            "epoch": epoch,
+            "model_state": model.state_dict(),
+            "optimizer_state": optimizer.state_dict(),
+            "train_loss": train_loss,
+            "val_loss": val_loss,
+        }
+
+    def save_checkpoints(
+        self,
+        train_loss,
+        val_loss,
+        model,
+        optimizer,
+        epoch,
+        ):
+        best_path = self.checkpoint_dir / "kvae-best.pt"
+
+        if val_loss < self.best_val:
+            self.best_val = val_loss
+            self.save_checkpoint(best_path, model, optimizer, epoch, train_loss, val_loss)
+
+        if self.ckpt_every > 0 and epoch % self.ckpt_every == 0:
+            ckpt_path = self.checkpoint_dir / f"kvae-ckpt-epoch={epoch:03d}.pt"
+            self.save_checkpoint(ckpt_path, model, optimizer, epoch, train_loss, val_loss)
+
+    def save_checkpoint(self, path, model, optimizer, epoch, train_loss, val_loss):
+        torch.save(
+            self.payload(model, optimizer, epoch, train_loss, val_loss),
+            path
+        )
+        print(f"Saved checkpoint at epoch {epoch} to {path}")
