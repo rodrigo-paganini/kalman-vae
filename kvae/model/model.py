@@ -190,9 +190,9 @@ class KVAE(nn.Module):
             "entropy":         entropy,
         }
 
+
     @torch.no_grad()
-    def impute(self, x, mask, u = None, return_latents = False,
-    ):
+    def impute(self, x, mask, u=None):
         """
         Impute missing data in sequence x given mask
         Args:

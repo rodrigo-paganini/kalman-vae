@@ -72,6 +72,20 @@ def save_frames(x, filename, fps=10):
     print(f"Saved video to {filename}")
 
 
+def pre_vidsave_trans(x, index=0):
+    """
+    x: torch.Tensor of shape (B, T, C, H, W)
+
+    Returns:
+        np.ndarray of shape (T, H, W, C) for the first sequence in the batch.
+    """
+    x_seq = x[index].detach().cpu().numpy()  # (T, C, H, W)
+    if x_seq.ndim == 4:
+        x_seq = np.transpose(x_seq, (0, 2, 3, 1))  # (T, H, W, C)
+    return x_seq
+
+
+# NOTE: Not used anymore, using imputation directly
 def reconstruct_and_save(
     model: KVAE,
     loader: DataLoader,
@@ -91,18 +105,8 @@ def reconstruct_and_save(
         outputs = model(x)
         x_recon = outputs["x_recon"]      # (B, T, C, H, W)
 
-    # Use only the first sequence in the batch
-    x_true_seq = x[0].detach().cpu().numpy()       # (T, C, H, W)
-    x_recon_seq = x_recon[0].detach().cpu().numpy()
-
-    # Convert (T, C, H, W) -> (T, H, W, C)
-    if x_true_seq.ndim == 4:
-        x_true_seq = np.transpose(x_true_seq, (0, 2, 3, 1))
-    if x_recon_seq.ndim == 4:
-        x_recon_seq = np.transpose(x_recon_seq, (0, 2, 3, 1))
-
-    save_frames(x_true_seq,  str(out_dir / f"{prefix}_true.mp4"))
-    save_frames(x_recon_seq, str(out_dir / f"{prefix}_recon.mp4"))
+    save_frames(pre_vidsave_trans(x[0]),  str(out_dir / f"{prefix}_true.mp4"))
+    save_frames(pre_vidsave_trans(x_recon[0]), str(out_dir / f"{prefix}_recon.mp4"))
 
 
 @torch.no_grad()
@@ -252,54 +256,10 @@ def impute_batch(model, batch, mask, device):
     # MSE on missing frames
     def mse_on_unobs(x_hat):
         diff2 = (x - x_hat) ** 2
-        diff2 = diff2 * unobs_px
-        return diff2.sum().item() / unobs_px.sum().item()
-    
+        mask_full = unobs_px.expand_as(x)       # [B,T,C,H,W]
+        diff2 = diff2[mask_full.bool()]        # flatten all missing pixels
+        return diff2.mean().item()
 
-@torch.no_grad()
-def impute_batch(model, batch, mask, device):
-    """
-    Imputation evaluation on a single batch:
-    - uses model.impute(...) with a given mask
-    - reconstructs x from:
-        * VAE a (x_recon)
-        * smoothed a (x_imputed)
-        * filtered a (x_filtered)
-    - computes Hamming distances on unobserved frames.
-    """
-    model.eval()
-
-    x = batch["images"].float().to(device)      # [B,T,C,H,W]
-    B, T, C, H, W = x.shape
-
-    # Optional controls
-    u = batch.get("controls", None)
-    if u is not None:
-        u = u.to(device)
-
-    mask = mask.to(device)
-
-    # KVAE imputation
-    imp_out = model.impute(x, mask=mask, u=u)
-
-    x_recon    = imp_out["x_recon"]    # [B,T,C,H,W] (VAE baseline)
-    x_imputed  = imp_out["x_imputed"]  # [B,T,C,H,W] (smoothing)
-    x_filtered = imp_out["x_filtered"] # [B,T,C,H,W] (filtering)
-
-    # 1 = observed, 0 = missing -> we want missing
-    unobs = (mask < 0.5)                 # [B,T]
-    if unobs.sum() == 0:
-        return None
-
-    # Expand mask to pixelwise shape for broadcasting
-    unobs_px = unobs.view(B, T, 1, 1, 1)   # [B,T,1,1,1]
-
-    # MSE on missing frames
-    def mse_on_unobs(x_hat):
-        diff2 = (x - x_hat) ** 2
-        diff2 = diff2 * unobs_px
-        return diff2.sum().item() / unobs_px.sum().item()
-    
     # MSE on baseline (comparing random unobserved frames)
     baseline = 0.0
     for i in [0, min(3, T-1), min(6, T-1)]:
@@ -324,6 +284,10 @@ def impute_batch(model, batch, mask, device):
     mse_recon    = mse_on_unobs(x_recon)        # MSE using VAE reconstruction
 
     return {
+        "x_real":     x,
+        "x_recon":    x_recon,
+        "x_imputed": x_imputed,
+        "x_filtered": x_filtered,
         "mse_smooth": mse_smooth,
         "mse_filt":   mse_filt,
         "mse_recon":  mse_recon,
@@ -591,7 +555,24 @@ if __name__ == "__main__":
         train_metrics = train_one_epoch(model, train_loader, optimizer, device, cfg.grad_clip_norm, scheduler, kf_weight)        
         val_metrics   = evaluate(model, val_loader, device, kf_weight)
 
+        train_loss = train_metrics["loss"]
+        val_loss   = val_metrics["loss"]
+
+        # Kalman prediction testing
+        kf_mse, mse_naive = kalman_prediction_test(model, val_loader, device, max_batches=5)
+
+        # Logging
+        print(
+            f"Epoch {epoch:03d} [phase={phase}]\n"
+            f"Train loss (min) {train_loss:.6f} | ELBOs (max)"
+            f"(VAE {train_metrics['elbo_vae_total']:.6f}, KF {train_metrics['elbo_kf']:.6f})\n"
+            f"Val loss (min) {val_loss:.6f} "
+            f"(VAE {val_metrics['elbo_vae_total']:.6f}, KF {val_metrics['elbo_kf']:.6f})\n"
+            f"Kalman prediction MSE {kf_mse:.6e} vs naive {mse_naive:.6e}"
+        )
+        
         if (epoch % GENERATE_STEP == 0) or epoch == 1 or epoch == max_epochs:
+            # Imputation testing
             # Take one batch from the validation loader
             batch = next(iter(val_loader))
             B, T_cur = batch["images"].shape[:2]
@@ -606,32 +587,23 @@ if __name__ == "__main__":
             )
 
             imp_metrics = impute_batch(model, batch, mask_planning, device)
+
             if imp_metrics is not None:
                 print(
-                    f"[Epoch {epoch}] Imputation planning "
+                    f"Testing - Imputation planning "
                     f"(t_init={T_INIT_MASK}, t_steps={T_STEPS_MASK}) "
-                    f"MSE (smooth: {imp_metrics['mse_smooth']:.6f}, "
-                    f"filt: {imp_metrics['mse_filt']:.6f}, "
-                    f"recon: {imp_metrics['mse_recon']:.6f})"
-                    f" | baseline: {imp_metrics['baseline']:.6f}"
+                    f"MSE (smooth: {imp_metrics['mse_smooth']:.6e}, "
+                    f"filt: {imp_metrics['mse_filt']:.6e}, "
+                    f"recon: {imp_metrics['mse_recon']:.6e})"
+                    f" | baseline: {imp_metrics['baseline']:.6e}"
                 )
 
-        train_loss = train_metrics["loss"]
-        val_loss   = val_metrics["loss"]
-        
-        # Kalman prediction test
-        kf_mse, mse_naive = kalman_prediction_test(model, val_loader, device, max_batches=5)
-        # VAE reconstruction test
-        reconstruct_and_save(model, val_loader, device, Path('./runs/'), prefix=f"vae_epoch{epoch:03d}")
-        # Logging
-        print(
-            f"Epoch {epoch:03d} [phase={phase}]\n"
-            f"Train loss (min) {train_loss:.6f} | ELBOs (max)"
-            f"(VAE {train_metrics['elbo_vae_total']:.6f}, KF {train_metrics['elbo_kf']:.6f})\n"
-            f"Val loss (min) {val_loss:.6f} "
-            f"(VAE {val_metrics['elbo_vae_total']:.6f}, KF {val_metrics['elbo_kf']:.6f})\n"
-            f"Kalman prediction MSE {kf_mse:.6e} vs naive {mse_naive:.6e}\n\n"
-        )
+                # Save all videos
+                save_frames(pre_vidsave_trans(imp_metrics["x_real"]), Path('./runs/') / f"epoch_{epoch}_real.mp4")
+                save_frames(pre_vidsave_trans(imp_metrics["x_recon"]),    Path('./runs/') / f"epoch_{epoch}_vae_recon.mp4")
+                save_frames(pre_vidsave_trans(imp_metrics["x_imputed"]),  Path('./runs/') / f"epoch_{epoch}_impute_smooth.mp4")
+                save_frames(pre_vidsave_trans(imp_metrics["x_filtered"]), Path('./runs/') / f"epoch_{epoch}_impute_filt.mp4")
+
         # Checkpointing
         if ckpt_dir:
             best_path = ckpt_dir / "best.pt"
