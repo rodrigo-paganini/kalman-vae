@@ -156,6 +156,9 @@ def main():
     logger.info("Starting training with configuration:")
     for key, value in config.items():
         logger.info(f"{key}: {value}")
+    from time import strftime, time
+    start_time = time()
+    logger.info(f"Training started at: {strftime('%Y-%m-%d %H:%M:%S')}")
 
     ckpt_dir = runs_dir / "checkpoints" if runs_dir else None
     ckpt = Checkpointer(ckpt_dir, train_cfg.ckpt_every)
@@ -205,10 +208,11 @@ def main():
         train_loss = train_metrics["loss"]
         val_loss   = val_metrics["loss"]
         
-        # Kalman prediction test
-        kf_mse, mse_naive = kalman_prediction_test(model, val_loader, device, max_batches=5)
-        # VAE reconstruction test
-        reconstruct_and_save(model, val_loader, device, runs_dir, prefix=f"vae_epoch{epoch:03d}")
+        if train_cfg.debug:
+            # Kalman prediction test
+            kf_mse, mse_naive = kalman_prediction_test(model, val_loader, device, max_batches=5)
+            # VAE reconstruction test
+            reconstruct_and_save(model, val_loader, device, runs_dir, prefix=f"vae_epoch{epoch:03d}")
         # Logging
         logger.info(
             f"Epoch {epoch:03d} [phase={phase}]\n"
