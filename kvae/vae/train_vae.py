@@ -33,8 +33,8 @@ from torch.utils.data import DataLoader, random_split
 
 from kvae.vae.config import KVAEConfig
 from kvae.vae.vae import VAE
-from kvae.data_loading.dataloader import make_toy_dataset
-from kvae.data_loading.pymunk_dataset import PymunkNPZDataset
+from kvae.dataloader.dataloader import make_toy_dataset
+from kvae.dataloader.pymunk_dataset import PymunkNPZDataset
 from kvae.vae.losses import vae_loss
 
 @dataclass
@@ -253,7 +253,7 @@ class TransformDataset(torch.utils.data.Dataset):
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument('--config', type=str, default='kvae/train/config.yaml', help='Path to YAML/JSON config file')
+    p.add_argument('--config', type=str, default='kvae/vae/config.yaml', help='Path to YAML/JSON config file')
     # VAE training specific args
     p.add_argument('--T', type=int, default=10, help='Length of each sequence in the (toy) dataset.')
     p.add_argument('--num-seq', type=int, default=200, help='Number of sequences in the (toy) dataset.')

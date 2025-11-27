@@ -1,6 +1,6 @@
 from kvae.model.model import KVAE
 from kvae.vae.vae import Encoder, Decoder
-from kvae.kalman.dyn_param import DynamicsParameterNetwork
+from kvae.kalman.dyn_param import DynamicsParameter
 from kvae.vae.config import KVAEConfig
 import torch
 import torch.nn.functional as F
@@ -46,7 +46,7 @@ def test_kvae_components():
     print("   ✓ Decoder working correctly")
     
     print(f"\n3. Testing LGSSM...")
-    lgssm = LGSSM(config)
+    lgssm = DynamicsParameter(config)
     a_seq = torch.randn(batch_size, T, config.a_dim)
     alpha = F.softmax(torch.randn(batch_size, T, config.num_modes), dim=-1)
     filtered = lgssm.kalman_filter(a_seq, alpha)
@@ -62,7 +62,7 @@ def test_kvae_components():
     print("   ✓ Kalman smoother working correctly")
     
     print(f"\n4. Testing Dynamics Parameter Network...")
-    dyn_net = DynamicsParameterNetwork(config)
+    dyn_net = DynamicsParameter(config)
     alpha_pred = dyn_net(a_seq)
     print(f"   Input shape: {a_seq.shape}")
     print(f"   Output alpha shape: {alpha_pred.shape}")
