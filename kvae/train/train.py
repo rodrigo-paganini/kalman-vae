@@ -3,10 +3,11 @@ import numpy as np
 from pathlib import Path
 import torch
 import numpy as np
+from dataclasses import dataclass
 
 from kvae.vae.config import KVAEConfig
 from kvae.model.model import KVAE
-from kvae.train.utils import build_dataloaders, save_checkpoint
+from kvae.train.utils import build_dataloaders, save_checkpoint, parse_config, parse_device, seed_all_modules
 from kvae.train.testing import reconstruct_and_save, kalman_prediction_test
 
 
@@ -140,47 +141,29 @@ def set_training_phase(model, phase: str):
                     p.requires_grad = True
 
 
-if __name__ == "__main__":
+def main():
     # Fix random seeds for reproducibility
-    seed = 10
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = False
+    config = parse_config()
+    train_cfg = TrainingConfig(**config['training'])
+
+    seed_all_modules(train_cfg.seed)
 
     # Core settings 
-    max_epochs = 80          # num_epochs
-    batch_size = 32          # batch_size
-    lr = 0.001               # init_lr
-    ckpt_every = 0
-    logdir = "runs"
-    device = "cpu" #"cuda" if torch.cuda.is_available() else "cpu"
-    T = 20  
-    only_vae_epochs = 5    
-    kf_update_epochs = 5   
+    max_epochs = train_cfg.max_epochs          # num_epochs
+    batch_size = train_cfg.batch_size          # batch_size
+    lr = train_cfg.lr               # init_lr
+    ckpt_every = train_cfg.ckpt_every
+    logdir = train_cfg.logdir
+    device = parse_device(train_cfg.device) #"cuda" if torch.cuda.is_available() else "cpu"
+    T = train_cfg.T
+    only_vae_epochs = train_cfg.only_vae_epochs
+    kf_update_epochs = train_cfg.kf_update_epochs   
 
     cfg = KVAEConfig()
     print(f"Using device: {device}")
 
-    pathfile_videos = "/Users/rodrigopaganini/master/data/pgm/kvae/box.npz"
+    pathfile_videos = config['dataset']['path']
     train_loader, val_loader = build_dataloaders(pathfile_videos, batch_size=batch_size, T=T)
-
-    # DEBUG
-    # # Plot a sample batch
-    # sample_batch = next(iter(train_loader))
-    # sample_images = extract_images(sample_batch)
-    # B, TT, C, H, W = sample_images.shape
-    # fig, axes = plt.subplots(1, TT, figsize=(TT * 2, 2))
-    # for t in range(TT):
-    #     ax = axes[t]
-    #     img = sample_images[0, t].squeeze().cpu().numpy()
-    #     ax.imshow(img, cmap="gray")
-    #     ax.axis("off")
-    #     ax.set_title(f"t={t}")
-    # plt.suptitle("Sample training sequence")
-    # plt.show()
 
     model = KVAE(cfg).to(device)
 
@@ -243,3 +226,23 @@ if __name__ == "__main__":
             if ckpt_every > 0 and epoch % ckpt_every == 0:
                 ckpt_path = ckpt_dir / f"epoch-{epoch:03d}.pt"
                 save_checkpoint(ckpt_path, model, optimizer, epoch, train_loss, val_loss)
+
+
+@dataclass
+class TrainingConfig:
+    seed: int = 10
+    max_epochs: int = 20
+    gpus: int = 1
+    lr: float = 1e-3
+    batch_size: int = 32
+    ckpt_every: int = 5
+    only_vae_epochs: int = 5    
+    kf_update_epochs: int = 5  
+    device: str = 'auto'
+    logdir: str = 'runs'
+    T: int = 20
+    debug: bool = False
+
+
+if __name__ == "__main__":
+    main()
