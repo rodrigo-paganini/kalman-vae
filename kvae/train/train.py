@@ -41,9 +41,6 @@ def train_one_epoch(model, loader, optimizer, device, scheduler=None, kf_weight=
 
         loss.backward()
 
-        if tb_logger is not None:
-            tb_logger.log_metrics(losses, 'train')
-
         optimizer.step()
 
         if scheduler is not None:
@@ -61,7 +58,7 @@ def train_one_epoch(model, loader, optimizer, device, scheduler=None, kf_weight=
         "elbo_vae_total": total_vae  / denom,
     }
 
-    if tb_logger:
+    if tb_logger is not None:
         tb_logger.log_epoch_metrics(epoch_losses, 'train')
 
     return epoch_losses
@@ -90,9 +87,6 @@ def evaluate(model, loader, device, kf_weight=1.0, tb_logger=None):
         total_vae  += elbo_vae_tot.detach()
         n_batches  += 1
 
-        if tb_logger is not None:
-            tb_logger.log_metrics(losses, 'val')
-
     denom = max(n_batches, 1)
     epoch_losses = {
         "loss":          total_loss / denom,
@@ -102,6 +96,7 @@ def evaluate(model, loader, device, kf_weight=1.0, tb_logger=None):
 
     if tb_logger:
         tb_logger.log_epoch_metrics(epoch_losses, 'val')
+        tb_logger.log_images(batch["images"], outputs["x_recon"])
 
     return epoch_losses
 
@@ -236,6 +231,9 @@ def main():
         # Checkpointing
         if ckpt_dir:
             ckpt.save_checkpoints(train_loss, val_loss, model, optimizer, epoch)
+
+        if tb_logger is not None:
+            tb_logger.incr_epoch()
 
 
 @dataclass
