@@ -18,4 +18,4 @@ latest-run:
 
 board: latest-run
 	@echo "Starting TensorBoard for: $(LATEST_RUN)"
-	@tensorboard --logdir "$(LATEST_RUN)/tb_logs"
+	@tensorboard --logdir "$(LATEST_RUN)"

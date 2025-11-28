@@ -53,7 +53,7 @@ class TensorBoardLogger:
     def __init__(self, logdir: str):
         self.logdir = Path(logdir)
         self.logdir.mkdir(parents=True, exist_ok=True)
-        self.tb_logger = PLTensorBoardLogger(save_dir=str(self.logdir), name="tb_logs", version="")
+        self.tb_logger = PLTensorBoardLogger(save_dir=str(self.logdir), name="", version="")
         self.global_step = 0
         self.global_epoch = 0
 
