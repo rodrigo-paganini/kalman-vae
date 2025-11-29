@@ -25,11 +25,11 @@ class KVAE(nn.Module):
         self.K = config.num_modes
         self.z_dim = config.z_dim
         self.a_dim = config.a_dim
+        self.u_dim = config.u_dim
 
         A_in = torch.eye(self.z_dim).unsqueeze(0).repeat(self.K, 1, 1)  # [K, z, z]
-        A_in = A_in + torch.randn_like(A_in) * 0.01
         init_std = config.init_kf_matrices 
-        B_in = torch.randn(self.K, self.z_dim, self.z_dim) * init_std
+        B_in = torch.randn(self.K, self.z_dim, self.u_dim) * init_std
         C_in = torch.randn(self.K, self.a_dim, self.z_dim) * init_std
         dynamics_net = DynamicsParameter(A_in, B_in, C_in, hidden_lstm=config.dynamics_hidden_dim)
 
@@ -102,7 +102,7 @@ class KVAE(nn.Module):
         
         Args:
             x: Input sequence [batch, T, channels, height, width]
-            u: Control inputs [batch, T, z_dim] (optional)
+            u: Control inputs [batch, T, u_dim] (optional)
             mask: [B, T] observation mask (1=observed, 0=missing)
         
         Returns:
@@ -112,7 +112,7 @@ class KVAE(nn.Module):
         a_samples, a_mu, a_var = self.encode_sequence(x)
 
         if u is None:
-            u = torch.zeros(x.shape[0], x.shape[1], self.z_dim, device=x.device)
+            u = torch.zeros(x.shape[0], x.shape[1], self.u_dim, device=x.device, dtype=x.dtype)
 
         # Reset LSTM state before running KF on this sequence
         self.kalman_filter.dyn_params.reset_state()
@@ -126,10 +126,15 @@ class KVAE(nn.Module):
         )
         
         # Decode
-        x_recon = self.decode_sequence(a_samples)
+        x_logits = self.decode_sequence(a_samples)
+        if self.config.out_distr.lower() == "bernoulli":
+            x_recon = torch.sigmoid(x_logits)
+        else:
+            x_recon = x_logits
 
         return {
             "x_recon":       x_recon,
+            "x_logits":      x_logits,
             "a_samples":     a_samples,
             "a_mu":          a_mu,
             "a_var":         a_var,
@@ -144,7 +149,7 @@ class KVAE(nn.Module):
         }
         
     
-    def compute_loss(self, x, outputs, kf_weight=1.0, mask=None):
+    def compute_loss(self, x, outputs, kf_weight=1.0, vae_weight=1.0, mask=None):
         batch_size, T = x.shape[:2]
 
         a      = outputs["a_samples"]
@@ -156,10 +161,10 @@ class KVAE(nn.Module):
         A_list, B_list, C_list = outputs["ABC"]
 
         # Controls
-        u = outputs.get("u", torch.zeros(batch_size, T, self.z_dim, device=x.device, dtype=x.dtype))
+        u = outputs.get("u", torch.zeros(batch_size, T, self.u_dim, device=x.device, dtype=x.dtype))
         
         # Reconstruction distribution p(x | a)
-        x_mu  = outputs["x_recon"]
+        x_mu  = outputs.get("x_logits", outputs["x_recon"])
         x_var = torch.tensor(self.config.noise_pixel_var, device=x.device, dtype=x_mu.dtype)
 
         # VAE ELBO
@@ -168,6 +173,7 @@ class KVAE(nn.Module):
             a, a_mu, a_var,
             scale_reconstruction=self.config.scale_reconstruction,
             mask=mask,
+            out_distr=self.config.out_distr,
         )
         
         # Kalman ELBO
@@ -178,18 +184,17 @@ class KVAE(nn.Module):
         )
 
         # Combine ELBOs
-        elbo_total = vae_elbo + kf_weight * elbo_kf
+        elbo_total = vae_weight * vae_elbo + kf_weight * elbo_kf
         loss = -elbo_total
 
         return {
-            "loss":            loss,
-            "elbo_total":      elbo_total,
-            "elbo_kf":         elbo_kf,
-            "elbo_vae_total":  vae_elbo,
-            "recon":           recon,
-            "entropy":         entropy,
+            "loss": loss,
+            "elbo_total": elbo_total,
+            "elbo_kf": elbo_kf,
+            "elbo_vae_total": vae_elbo,
+            "recon": recon,
+            "kl": entropy,
         }
-
 
     @torch.no_grad()
     def impute(self, x, mask, u=None):
@@ -198,7 +203,7 @@ class KVAE(nn.Module):
         Args:
             x: Input sequence with missing data [B,T,C,H,W]
             mask: Observation mask [B,T] (1=observed, 0=missing)
-            u: Control inputs [B,T,z_dim] (optional)
+            u: Control inputs [B,T,u_dim] (optional)
         Returns:
             Dictionary with:
                 x_recon: VAE reconstruction from a_samples [B,T,C,H,W]
@@ -223,19 +228,22 @@ class KVAE(nn.Module):
         A_list, B_list, C_list = outputs["ABC"]       
 
         # Baseline decoder reconstruction from original a_samples
-        x_recon    = self.decode_sequence(a_vae)       # [B,T,C,H,W]
+        x_recon_logits = self.decode_sequence(a_vae)       # [B,T,C,H,W]
+        x_recon = torch.sigmoid(x_recon_logits) if self.config.out_distr.lower() == "bernoulli" else x_recon_logits
 
         # Compute a_imputed = C_t z_{t|1:T}
         z_smooth = mus_smooth                          # [B,T,n,1]
         a_imputed = (C_list @ z_smooth).squeeze(-1)    # [B,T,p] 
         # Uses smoothed latent states (past + future) then decodes.
-        x_imputed  = self.decode_sequence(a_imputed)
+        x_imputed_logits  = self.decode_sequence(a_imputed)
+        x_imputed = torch.sigmoid(x_imputed_logits) if self.config.out_distr.lower() == "bernoulli" else x_imputed_logits
 
         # Compute a_filtered = C_t z_{t|1:t}
         z_filt = mus_filt                # [B,T,n,1]
         a_filtered = (C_list @ z_filt).squeeze(-1)     # [B,T,p]
         # Uses filtered latent states (past only) then decodes (online baseline)
-        x_filtered = self.decode_sequence(a_filtered)
+        x_filtered_logits = self.decode_sequence(a_filtered)
+        x_filtered = torch.sigmoid(x_filtered_logits) if self.config.out_distr.lower() == "bernoulli" else x_filtered_logits
     
         return {
             "x_recon":    x_recon,

@@ -10,16 +10,17 @@ class KVAEConfig:
     # Latent dims
     a_dim: int = 2              # dim_a
     z_dim: int = 4              # dim_z
+    u_dim: Optional[int] = None # dim_u (controls)
 
     # LGSSM / mixture
     num_modes: int = 3              # K
     noise_emission: float = 0.03    # measurement noise (on a)
-    noise_transition: float = 0.08  # process noise (on z)  
+    noise_transition: float = 0.02  # process noise (on z)  
     init_cov: float = 20.0          # initial state variance 
     init_kf_matrices: float = 0.05  # std for B,C init      
 
     # VAE arch (conv=True, num_filters="32,32,32", filter_size=3)
-    out_distr: str = "gaussian"  # "bernoulli" or "gaussian"
+    out_distr: str = "bernoulli"  # "bernoulli" or "gaussian"
     encoder_channels: Optional[List[int]] = None
     encoder_kernel_size: int = 3
     encoder_stride: int = 2
@@ -31,7 +32,7 @@ class KVAEConfig:
     decoder_padding: int = 1
 
     noise_pixel_var: float = 0.1
-    scale_reconstruction: float = 2  # same as TF scale_reconstruction
+    scale_reconstruction: float = 0.3
 
     # Alpha / dynamics network (alpha_rnn=True, alpha_units=50)
     dynamics_hidden_dim: int = 50      # LSTM hidden size ~ alpha_units
@@ -40,11 +41,13 @@ class KVAEConfig:
     grad_clip_norm: float = 150.0      # max_grad_norm in TF
     recon_weight: float = 0.3          # if you use it anywhere
 
-    init_lr: float = 0.007      # init_lr
+    init_lr: float = 0.001      # init_lr
     decay_rate: float = 0.85    # decay_rate
     decay_steps: int = 20       # decay_steps
 
     def __post_init__(self):
+        if self.u_dim is None:
+            self.u_dim = self.z_dim
         if self.encoder_channels is None:
             self.encoder_channels = [32, 32, 32]
         if self.decoder_channels is None:

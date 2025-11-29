@@ -166,17 +166,22 @@ class VAE(nn.Module):
         x_flat = x.view(-1, *x.shape[2:])  # [B*T, C, H, W]
         mu, var = self.encode(x_flat)
         a = self.reparameterize(mu, var)
-        x_recon_mu = self.decode(a)
+        x_recon_mu = self.decode(a)  # logits if Bernoulli, mean if Gaussian
+
+        if self.config.out_distr.lower() == "bernoulli":
+            x_recon = torch.sigmoid(x_recon_mu)
+        else:
+            x_recon = x_recon_mu
 
         # scalar reconstruction variance from config
         x_recon_var = torch.tensor(self.config.noise_pixel_var, device=x.device, dtype=x_recon_mu.dtype)
 
         # reshape back
-        x_recon = x_recon_mu.view(B, T, *x_recon_mu.shape[1:])
         x_recon_mu = x_recon_mu.view(B, T, *x_recon_mu.shape[1:])
         mu = mu.view(B, T, -1)
         var = var.view(B, T, -1)
         a = a.view(B, T, -1)
+        x_recon = x_recon.view(B, T, *x_recon_mu.shape[1:])
 
         return {
             'x_recon': x_recon,

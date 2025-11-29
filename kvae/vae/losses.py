@@ -2,10 +2,6 @@
 import torch
 import torch.nn.functional as F
 
-from kvae.vae.config import KVAEConfig
-import math
-
-
 def log_gaussian(x: torch.Tensor, mean: torch.Tensor, var: torch.Tensor) -> torch.Tensor:
     """
     Compute log N(x; mean, var).
@@ -72,24 +68,34 @@ def vae_loss(
     a_var: torch.Tensor,
     scale_reconstruction: float = 0.3,
     mask: torch.Tensor | None = None,
+    out_distr: str = "gaussian",
 ):
     B, T, C, H, W = x.shape
     if mask is None:
-        denom = B * T
+        mask_ = torch.ones(B, T, device=x.device, dtype=x.dtype)
     else:
         mask_ = mask.to(device=x.device, dtype=x.dtype)
         if mask_.shape != (B, T):
             mask_ = mask_.view(B, T)
-        denom = mask_.sum().clamp(min=1.0)
+    denom = mask_.sum().clamp(min=1.0)
 
-    log_px_given_a, log_qa_given_x = log_likelihood(
-        x, x_mu, x_var,
-        a, a_mu, a_var,
-        mask=mask,
-    )
+    if out_distr.lower() == "bernoulli":
+        # x_mu is treated as logits for Bernoulli
+        bce = F.binary_cross_entropy_with_logits(x_mu, x, reduction="none")
+        log_px_per_frame = -bce.sum(dim=(2, 3, 4))  # [B,T]
+        log_px_given_a = (log_px_per_frame * mask_).sum()
+        # q(a|x) stays Gaussian
+        log_q_per_frame = log_gaussian(a, a_mu, a_var).sum(dim=-1)
+        log_qa_given_x = (log_q_per_frame * mask_).sum()
+    else:
+        log_px_given_a, log_qa_given_x = log_likelihood(
+            x, x_mu, x_var,
+            a, a_mu, a_var,
+            mask=mask,
+        )
 
-    recon   = -scale_reconstruction * (log_px_given_a / denom)
-    entropy = -(log_qa_given_x / denom)
+    recon_logprob = scale_reconstruction * (log_px_given_a / denom)  
+    entropy      = -(log_qa_given_x / denom)                         
+    vae_elbo     = recon_logprob + entropy
 
-    vae_elbo = (scale_reconstruction * log_px_given_a - log_qa_given_x) / denom
-    return vae_elbo, recon, entropy
+    return vae_elbo, recon_logprob, entropy

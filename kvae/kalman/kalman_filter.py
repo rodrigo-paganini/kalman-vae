@@ -222,6 +222,7 @@ class KalmanFilter(nn.Module):
         mus_smooth = [mu_T]
         Sigmas_smooth = [Sigma_T]
         for t in range(T-2, -1, -1):      # t = T-2, …, 0
+            A_t = A_list[:, t+1]
             mu_t_T, Sigma_t_T = self.smooth_step(
                 Sigmas_filt[:, t],  # Sigma_t_t
                 Sigmas_pred[:, t+1],# Sigma_tpost_t
@@ -229,7 +230,7 @@ class KalmanFilter(nn.Module):
                 mus_filt[:, t],     # mu_t_t
                 mus_pred[:, t+1],   # mu_tpost_t
                 mu_T,               # mu_tpost_T
-                A_list[:, t]      # A_t
+                A_t                 # A_t 
                 )
             # Update for next step
             mu_T, Sigma_T = mu_t_T, Sigma_t_T
@@ -237,8 +238,9 @@ class KalmanFilter(nn.Module):
             mus_smooth.append(mu_t_T)
             Sigmas_smooth.append(Sigma_t_T)
 
-        mus_smooth    = torch.stack(mus_smooth, 1)     # [B,T,n]
-        Sigmas_smooth = torch.stack(Sigmas_smooth, 1)  # [B,T,n,n]
+        # Reverse to restore chronological order (0 ... T-1)
+        mus_smooth    = torch.stack(list(reversed(mus_smooth)), 1)     # [B,T,n]
+        Sigmas_smooth = torch.stack(list(reversed(Sigmas_smooth)), 1)  # [B,T,n,n]
 
         return (
             mus_smooth, Sigmas_smooth,
@@ -281,7 +283,7 @@ class KalmanFilter(nn.Module):
             u_t:        [B,T,m]   controls
             mask:       [B,T]     with 1 = observed, 0 = missing
         Returns:
-            elbo:       [B]       ELBO per batch element
+            elbo:       scalar    ELBO averaged over batch
         """
         # TODO: review dimensions
         B = y_t.size(0)
@@ -341,12 +343,12 @@ class KalmanFilter(nn.Module):
         # Entropy term [B,T]
         entropy = -mvn_smooth.log_prob(z_t_samp)
 
-        # ELBO computation as sum per frame (with masking)
-        denom = mask_tens.sum().clamp(min=1.0) # sum per observed frame
+        # ELBO computation normalized by total observed frames
+        num_el = mask_tens.sum().clamp(min=1.0)
         elbo = (
             log_prob_trans.sum() +
             log_prob_emiss.sum() +
             log_prob_init.sum() +
             entropy.sum()
-        ) / denom
+        ) / num_el
         return elbo
