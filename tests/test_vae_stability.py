@@ -1,7 +1,7 @@
 import torch
 import torch.nn.functional as F
-from kvae.model.config import KVAEConfig
-from kvae.model.vae import VAE
+from kvae.vae.config import KVAEConfig
+from kvae.vae.vae import VAE
 
 
 def _make_dummy_batch(cfg, B=2, T=4):
@@ -36,7 +36,7 @@ def test_deterministic_forward_with_seed():
     x1 = _make_dummy_batch(cfg, B=2, T=3)
     out1 = vae1(x1)
 
-    out2 = torch.load('tests/fixtures/out1.pt')
+    out2 = torch.load('tests/fixtures/out1_bernoulli.pt')
 
     assert out1['x_recon_mu'].shape == out2['x_recon_mu'].shape, "Output shape has changed. Update the fixture if this is intentional."
     assert torch.allclose(out1['x_recon_mu'], out2['x_recon_mu'], atol=1e-6), "Output values have changed. Update the fixture if this is intentional."
@@ -77,3 +77,6 @@ def test_forward_backward_and_parameter_update():
     # at least one parameter tensor changed
     changed = any(not torch.allclose(a, b) for a, b in zip(params_before, params_after))
     assert changed, "Optimizer step did not change model parameters"
+
+
+test_deterministic_forward_with_seed()

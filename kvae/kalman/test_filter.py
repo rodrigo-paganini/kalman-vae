@@ -1,7 +1,8 @@
 import numpy as np
 import torch
 import matplotlib.pyplot as plt
-from kalman_filter import KalmanFilter, DynamicsParameter
+from kalman_filter import KalmanFilter
+from dyn_param import DynamicsParameter
 
 # ----- Rocket example - Simple Kalman filter  -----
 dt = 0.1
@@ -63,7 +64,7 @@ U = torch.from_numpy(u_meas).to(dtype=model_dtype, device=model_device).unsqueez
 # Compute filter
 mus_filt, Sigmas_filt, mus_pred, Sigmas_pred, A_list, B_list, C_list = kf.filter(Y, U)
 # # Compute smoother
-mus_smooth, Sigmas_smooth, _, _, _ = kf.smooth(Y, U)
+mus_smooth, Sigmas_smooth, *rest = kf.smooth(Y, U)
 # # Compute ELBO
 elbo = kf.elbo(mus_smooth, Sigmas_smooth, Y, U, A_list, B_list, C_list)
 print(f"ELBO: {elbo.item():.2f}")

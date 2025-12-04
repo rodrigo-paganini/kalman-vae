@@ -1,6 +1,6 @@
 import torch
-from kvae.model.config import KVAEConfig
-from kvae.model.vae import VAE
+from kvae.vae.config import KVAEConfig
+from kvae.vae.vae import VAE
 
 
 def test_vae_forward_shapes():

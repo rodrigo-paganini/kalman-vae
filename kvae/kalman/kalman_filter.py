@@ -3,72 +3,7 @@ import torch
 import torch.nn as nn
 from torch.distributions import MultivariateNormal
 import matplotlib.pyplot as plt
-
-
-class DynamicsParameter(nn.Module):
-    def __init__(self, A, B, C, hidden_lstm=32):
-        """
-        A0: [K, n,n] initial state transition matrix
-        B0: [K, n,m] initial control input matrix
-        C0: [K, p,n] initial observation matrix
-        """
-        super().__init__()
-        self.K = A.size(0)  
-        n = A.size(1)
-        m = B.size(2)
-        p = C.size(1)
-        self.n, self.m, self.p = n, m, p
-
-        self.A = nn.Parameter(A.clone()) 
-        self.B = nn.Parameter(B.clone())
-        self.C = nn.Parameter(C.clone())
-
-        self.lstm_state = None 
-
-        if self.K > 1:
-            self.lstm = nn.LSTM(
-                input_size=self.p, 
-                hidden_size=hidden_lstm, 
-                num_layers=1, 
-                batch_first=True)
-
-            self.mlp = nn.Sequential(
-                nn.Linear(hidden_lstm, hidden_lstm), 
-                nn.Tanh(),
-                )
-            
-            self.head_w = nn.Linear(hidden_lstm, self.K)
-
-    def reset_state(self):
-        self.lstm_state = None
-
-    #TODO: why only a and not z?
-    def compute_step(self, a_tprev):
-        batch = a_tprev.size(0)
-
-        if self.K == 1:
-            A = self.A[0].expand(batch, -1, -1)
-            B = self.B[0].expand(batch, -1, -1)
-            C = self.C[0].expand(batch, -1, -1)
-
-            return A, B, C
-
-        else:
-            a_tprev = a_tprev.unsqueeze(1)  
-
-            h, new_state = self.lstm(a_tprev, self.lstm_state)
-            f = self.mlp(h)                 
-            self.w = torch.softmax(self.head_w(f), dim=-1).squeeze(1)  
-            
-            self.lstm_state = new_state
-
-            A = torch.einsum('bk,kij->bij', self.w, self.A)
-            B = torch.einsum('bk,knm->bnm', self.w, self.B)
-            C = torch.einsum('bk,kpn->bpn', self.w, self.C)
-
-            return A, B, C
         
-
 class KalmanFilter(nn.Module):
     def __init__(self, std_dyn, std_obs, mu0, Sigma0, dyn_params):
         super().__init__()
@@ -93,7 +28,7 @@ class KalmanFilter(nn.Module):
         self.register_buffer("Sigma0", Sigma0.clone())  # [n,n]
     
 
-    def filter_step(self, mu_t_t, Sigma_t_t, y_t, u_t, A, B, C):
+    def filter_step(self, mu_t_t, Sigma_t_t, y_t, u_t, A, B, C, mask_t=None):
         # [B,n,n], [B,n,m], [B,p,n]
         batch = y_t.size(0)
 
@@ -113,6 +48,15 @@ class KalmanFilter(nn.Module):
             y_t = y_t.unsqueeze(-1)               # [B,p,1]
         else:
             y_t = y_t                             # [B,p,1]
+
+        # Shape mask 
+        if mask_t is None:
+            mask_t = torch.ones(batch, device=y_t.device, dtype=y_t.dtype)
+        else:
+            mask_t = mask_t.to(device=y_t.device, dtype=y_t.dtype)
+            if mask_t.dim() == 0:
+                mask_t = mask_t.expand(batch)
+        mask_exp = mask_t.view(batch, 1, 1)   
 
         # Prediction step - Compute beliefs at time t given data up to t-1
         Sigma_tprev_tprev = Sigma_t_t       # [B,n,n]
@@ -137,6 +81,9 @@ class KalmanFilter(nn.Module):
         PCT = Sigma_t_tprev @ C.mT
         # [B,n,p] : (solve([B,p,p], [B,n,p].T) -> [B,p,n]).T
         K   = torch.linalg.solve(S, PCT.mT).mT
+        # Apply mask to Kalman gain
+        # For missing values, set to 0 the Kalman gain matrix
+        K = mask_exp * K
 
         # Posterior mean
         # [B,n] = [B,n] + [B,n,p] @ [B,p,1]
@@ -151,15 +98,16 @@ class KalmanFilter(nn.Module):
         return mu_t_t, Sigma_t_t, mu_t_tprev, Sigma_t_tprev, A, B, C
 
 
-    def filter(self, Y, U):
+    def filter(self, Y, U, mask=None):
         """
         The forward pass of the Kalman filter computes the posterior
         at a given t given the observations up to time t.
         p(z_t | y_1:t, u_1:t) = N(z_t| mu_t,t-1 , Sigma_t,t-1)
         NOTE: if the LGSSM is fixed we can use batch solver
         Args:
-            Y: [B,T,p] observations
-            U: [B,T,m] controls
+            Y:    [B,T,p] observations
+            U:    [B,T,m] controls
+            mask: [B, T] with 1 = observed, 0 = missing
         Returns:
             mus_filt:    [B,T,n] filtered means (mu_t,t)
             Sigmas_filt: [B,T,n,n] filtered covariances (Sigma_t,t)
@@ -169,6 +117,14 @@ class KalmanFilter(nn.Module):
         batch, T, _ = Y.shape
         mu    = self.mu0.expand(batch, -1)            # [B,n]
         Sigma = self.Sigma0.expand(batch, -1, -1)     # [B,n,n]
+
+        # Mask shape
+        if mask is None:
+            mask_tens = torch.ones(batch, T, device=Y.device, dtype=Y.dtype)
+        else:
+            mask_tens = mask.to(device=Y.device, dtype=Y.dtype)
+            if mask_tens.shape != (batch, T):
+                mask_tens = mask_tens.view(batch, T)
 
         # Get initial A, B, C matrices NOTE: using zeros as priming input
         A, B, C = self.dyn_params.compute_step(torch.zeros((batch, self.p), device=Y.device, dtype=Y.dtype))
@@ -184,9 +140,12 @@ class KalmanFilter(nn.Module):
             # Get current observation and control
             y_t = Y[:, t]
             u_t = U[:, t]
+            m_t = mask_tens[:, t]
             
             # Compute filter step
-            mu_t_t, Sigma_t_t, mu_t_tprev, Sigma_t_tprev, _, _, _ = self.filter_step(mu, Sigma, y_t, u_t, A, B, C)
+            mu_t_t, Sigma_t_t, mu_t_tprev, Sigma_t_tprev, _, _, _ = self.filter_step(
+                mu, Sigma, y_t, u_t, A, B, C, mask_t=m_t
+            )
 
             # Store results
             mus_filt.append(mu_t_t)
@@ -199,13 +158,23 @@ class KalmanFilter(nn.Module):
 
             # Update for next step
             mu, Sigma = mu_t_t, Sigma_t_t
+
             # Compute A, B, C at time t (to be used at next step)
-            A, B, C = self.dyn_params.compute_step(y_t)  
+            y_pred = (C @ mu_t_tprev).squeeze(-1)
+            m_col = m_t.view(batch, 1)
+            y_for_dyn = m_col * y_t + (1.0 - m_col) * y_pred
+            A, B, C = self.dyn_params.compute_step(y_for_dyn)  
 
-
-        return torch.stack(mus_filt, 1), torch.stack(Sigmas_filt, 1), torch.stack(mus_pred, 1), torch.stack(Sigmas_pred, 1), \
-                    torch.stack(A_list, 1), torch.stack(B_list, 1), torch.stack(C_list, 1)
-
+        return (
+            torch.stack(mus_filt, 1),
+            torch.stack(Sigmas_filt, 1),
+            torch.stack(mus_pred, 1),
+            torch.stack(Sigmas_pred, 1),
+            torch.stack(A_list, 1),
+            torch.stack(B_list, 1),
+            torch.stack(C_list, 1),
+        )
+    
 
     def smooth_step(self, Sigma_t_t, Sigma_tpost_t, Sigma_tpost_T,
                       mu_t_t, mu_tpost_t, mu_tpost_T, A):
@@ -237,14 +206,14 @@ class KalmanFilter(nn.Module):
         return mu_tpost_T, Sigma_tpost_T    
 
 
-    def smooth(self, Y, U):
+    def smooth(self, Y, U, mask=None):
         """
 
         """
         batch, T, _ = Y.shape
 
         # First run the filter to get filtered and predicted estimates
-        mus_filt, Sigmas_filt, mus_pred, Sigmas_pred, A_list, B_list, C_list = self.filter(Y, U)
+        mus_filt, Sigmas_filt, mus_pred, Sigmas_pred, A_list, B_list, C_list = self.filter(Y, U, mask=mask)
 
         # Initialize smoothing with last filtered estimate
         # mu_T-1|T-1, Sigma_T-1|T-1 
@@ -253,6 +222,7 @@ class KalmanFilter(nn.Module):
         mus_smooth = [mu_T]
         Sigmas_smooth = [Sigma_T]
         for t in range(T-2, -1, -1):      # t = T-2, …, 0
+            A_t = A_list[:, t+1]
             mu_t_T, Sigma_t_T = self.smooth_step(
                 Sigmas_filt[:, t],  # Sigma_t_t
                 Sigmas_pred[:, t+1],# Sigma_tpost_t
@@ -260,7 +230,7 @@ class KalmanFilter(nn.Module):
                 mus_filt[:, t],     # mu_t_t
                 mus_pred[:, t+1],   # mu_tpost_t
                 mu_T,               # mu_tpost_T
-                A_list[:, t]      # A_t
+                A_t                 # A_t 
                 )
             # Update for next step
             mu_T, Sigma_T = mu_t_T, Sigma_t_T
@@ -268,12 +238,42 @@ class KalmanFilter(nn.Module):
             mus_smooth.append(mu_t_T)
             Sigmas_smooth.append(Sigma_t_T)
 
-        mus_smooth.reverse()
-        Sigmas_smooth.reverse()
-        return torch.stack(mus_smooth, 1), torch.stack(Sigmas_smooth, 1), A_list, B_list, C_list
+        # Reverse to restore chronological order (0 ... T-1)
+        mus_smooth    = torch.stack(list(reversed(mus_smooth)), 1)     # [B,T,n]
+        Sigmas_smooth = torch.stack(list(reversed(Sigmas_smooth)), 1)  # [B,T,n,n]
+
+        return (
+            mus_smooth, Sigmas_smooth,
+            mus_filt, Sigmas_filt,
+            mus_pred, Sigmas_pred,
+            A_list, B_list, C_list,
+        )
 
 
-    def elbo(self, mu_t_T, Sigma_t_T, y_t, u_t, A_list, B_list, C_list):
+    def _safe_cholesky(self, Sigma, max_tries=5, jitter_init=1e-6): #TODO: unsure 
+        dev, dtp = Sigma.device, Sigma.dtype
+        n = Sigma.size(-1)
+
+        # Force symmetry
+        Sigma = 0.5 * (Sigma + Sigma.mT)
+
+        eye = torch.eye(n, device=dev, dtype=dtp)
+        jitter = jitter_init
+        for _ in range(max_tries):
+            try:
+                L = torch.linalg.cholesky(Sigma + jitter * eye)
+                return L
+            except torch._C._LinAlgError:
+                jitter *= 10.0  # increase jitter and try again
+
+        # Final fallback: use only the (clamped) diagonal
+        diag = torch.diagonal(Sigma, dim1=-2, dim2=-1)
+        diag = torch.clamp(diag, min=1e-6)
+        L = torch.diag_embed(torch.sqrt(diag))
+        return L
+    
+
+    def elbo(self, mu_t_T, Sigma_t_T, y_t, u_t, A_list, B_list, C_list, mask=None):
         """
         Compute the Evidence Lower Bound (ELBO)
         Args:
@@ -281,12 +281,21 @@ class KalmanFilter(nn.Module):
             Sigma_t_T:  [B,T,n,n] smoothed covariances
             y_t:        [B,T,p]   observations
             u_t:        [B,T,m]   controls
+            mask:       [B,T]     with 1 = observed, 0 = missing
         Returns:
-            elbo:       [B]       ELBO per batch element
+            elbo:       scalar    ELBO averaged over batch
         """
         # TODO: review dimensions
         B = y_t.size(0)
         T = y_t.size(1)
+
+        # Observation mask
+        if mask is None:
+            mask_tens = torch.ones(B, T, device=y_t.device, dtype=y_t.dtype)
+        else:
+            mask_tens = mask.to(device=y_t.device, dtype=y_t.dtype)
+            if mask_tens.shape != (B, T):
+                mask_tens = mask_tens.view(B, T)
 
         # Reshape mu_t_T to [B,T,n]
         if mu_t_T.dim() == 4:
@@ -299,8 +308,7 @@ class KalmanFilter(nn.Module):
 
         # Sample from the smoothed distribution - to ensure positive definiteness
         dev, dtp = self.Q.device, self.Q.dtype
-        jitter = 1e-6 * torch.eye(self.n, device=dev, dtype=dtp)
-        L = torch.linalg.cholesky(Sigma_t_T + jitter) 
+        L = self._safe_cholesky(Sigma_t_T)
         mvn_smooth = MultivariateNormal(mu_t_T, scale_tril=L)
         # Sample using reparameterization trick (keep gradients) [B,T,n,1] 
         z_t_samp = mvn_smooth.rsample()
@@ -312,16 +320,21 @@ class KalmanFilter(nn.Module):
         Az  = A_list[:, 1:] @ z_tprev   # [B,T-1,n,1]
         Bu  = B_list[:, 1:] @ u_t       # [B,T-1,n,1]
         
+        zero_n = torch.zeros(self.n, device=dev, dtype=dtp)
+        zero_p = torch.zeros(self.p, device=dev, dtype=dtp)
         mu_trans = (Az + Bu).squeeze(-1)  # [B,T-1,n]
         # TODO: why trick with z_t_transition - mu_transition? 
-        mvn_trans = MultivariateNormal(torch.zeros(self.n), self.Q)
+        mvn_trans = MultivariateNormal(zero_n, self.Q)
         # [B,T-1]
         log_prob_trans = mvn_trans.log_prob((z_t - mu_trans).squeeze(-1)) 
 
         # Emission likelihood - prod_{t=1}^T p(y_t|z_t) [B,T,p]
         mu_emiss = (C_list @ z_t_samp.unsqueeze(-1)).squeeze(-1)  # [B,T,p]  
-        mvn_emiss = MultivariateNormal(torch.zeros(self.p), self.R)
+        mvn_emiss = MultivariateNormal(zero_p, self.R)
         log_prob_emiss = mvn_emiss.log_prob(y_t - mu_emiss) # [B,T]
+
+        # Mask out missing observations in the emission term
+        log_prob_emiss = log_prob_emiss * mask_tens
 
         # Initial term [B]
         mvn_init = MultivariateNormal(self.mu0, self.Sigma0)
@@ -330,82 +343,12 @@ class KalmanFilter(nn.Module):
         # Entropy term [B,T]
         entropy = -mvn_smooth.log_prob(z_t_samp)
 
-        # ELBO computation as sum per frame 
-        denom = B * T
+        # ELBO computation normalized by total observed frames
+        num_el = mask_tens.sum().clamp(min=1.0)
         elbo = (
             log_prob_trans.sum() +
             log_prob_emiss.sum() +
             log_prob_init.sum() +
             entropy.sum()
-        ) / denom
+        ) / num_el
         return elbo
-    
-
-    def generate_sample(self, U, mus_t, Sigmas_t, gen_steps, warmup_steps=1, deterministic=True):
-        """
-        Generate a sample 
-        Args:
-            mus_t:      [B,T,n]   
-            Sigmas_t:   [B,T,n,n]  
-        """
-        device = self.Q.device
-        dtype  = self.Q.dtype
-
-        batch = U.size(0)
-        n_steps = gen_steps + warmup_steps
-
-        # If warmup, use filtered means as initial observation
-        if warmup_steps > 0 and mus_t is not None:
-            z = mus_t[:, 0, :].unsqueeze(-1)  # [B,n,1]
-        # Otherwise, sample from prior 
-        else:
-            prior = MultivariateNormal(self.mu0, self.Sigma0)
-            z = prior.sample((batch,)).unsqueeze(-1)  # [B,n,1]
-
-        if deterministic:
-            epsilon = torch.zeros((batch, n_steps, self.n), device=device, dtype=dtype)
-            delta   = torch.zeros((batch, n_steps, self.p), device=device, dtype=dtype)
-        else:
-            # Process noise
-            epsilon_mvn = MultivariateNormal(torch.zeros(self.n, device=device, dtype=dtype), self.Q)
-            epsilon = epsilon_mvn.sample((batch, n_steps))  # [B,n_steps,n]
-            # Measurement noise
-            delta_mvn = MultivariateNormal(torch.zeros(self.p, device=device, dtype=dtype), self.R)
-            delta = delta_mvn.sample((batch, n_steps))  # [B,n_steps,p]
-
-        self.dyn_params.reset_state()
-        A, B, C = self.dyn_params.compute_step(
-            torch.zeros((batch, self.p), device=device, dtype=dtype)
-        )
-
-        Y_list, Z_list = [], []
-        A_list, B_list, C_list = [], [], []
-        for t in range(n_steps):
-            # Force to use estimates for warmup steps
-            if t  < warmup_steps and mus_t is not None:
-                z = mus_t[:, t, :] # [B,n,1]
-            else:
-                u_t = U[:, t, :].unsqueeze(-1) # [B,m,1]
-                # [B,n] = [B,n,n] @ [B,n,1] + [B,n,m] @ [B,m,1] + [B,n]
-                z = A @ z + B @ u_t + epsilon[:, t].unsqueeze(-1)
-
-            # Compute observation
-            # [B,p] = [B,p,n] @ [B,n,1]
-            y = C @ z + delta[:, t].unsqueeze(-1)
-
-            # Store results
-            Y_list.append(y.squeeze(-1))
-            Z_list.append(z.squeeze(-1))
-            A_list.append(A)
-            B_list.append(B)
-            C_list.append(C)
-
-            # Compute A, B, C (for next step)
-            A, B, C = self.dyn_params.compute_step(y.squeeze(-1))
-
-        Y_gen = torch.stack(Y_list, 1)
-        Z_gen = torch.stack(Z_list, 1)
-        A_gen = torch.stack(A_list, 1)
-        B_gen = torch.stack(B_list, 1)
-        C_gen = torch.stack(C_list, 1)
-        return Y_gen, Z_gen, A_gen, B_gen, C_gen
