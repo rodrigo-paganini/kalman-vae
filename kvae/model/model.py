@@ -25,11 +25,11 @@ class KVAE(nn.Module):
         self.K = config.num_modes
         self.z_dim = config.z_dim
         self.a_dim = config.a_dim
+        self.u_dim = config.u_dim
 
         A_in = torch.eye(self.z_dim).unsqueeze(0).repeat(self.K, 1, 1)  # [K, z, z]
-        A_in = A_in + torch.randn_like(A_in) * 0.01
         init_std = config.init_kf_matrices 
-        B_in = torch.randn(self.K, self.z_dim, self.z_dim) * init_std
+        B_in = torch.randn(self.K, self.z_dim, self.u_dim) * init_std
         C_in = torch.randn(self.K, self.a_dim, self.z_dim) * init_std
         dynamics_net = DynamicsParameter(A_in, B_in, C_in, hidden_lstm=config.dynamics_hidden_dim)
 
@@ -96,14 +96,14 @@ class KVAE(nn.Module):
         return x_recon
     
 
-    def forward(self, x, u=None):
+    def forward(self, x, u=None, mask=None):
         """
         Full forward pass
         
         Args:
             x: Input sequence [batch, T, channels, height, width]
-            u: Control inputs [batch, T, z_dim] (optional)
-            use_smoothing: Whether to use Kalman smoothing
+            u: Control inputs [batch, T, u_dim] (optional)
+            mask: [B, T] observation mask (1=observed, 0=missing)
         
         Returns:
             Dictionary with reconstructions and latent variables
@@ -111,69 +111,81 @@ class KVAE(nn.Module):
         # Encode sequence
         a_samples, a_mu, a_var = self.encode_sequence(x)
 
-        # Kalman filtering
         if u is None:
-            u = torch.zeros(x.shape[0], x.shape[1], self.z_dim, device=x.device)
+            u = torch.zeros(x.shape[0], x.shape[1], self.u_dim, device=x.device, dtype=x.dtype)
 
-        # Kalman smoothing (optional)
-        mus_smooth, Sigmas_smooth, A_list, B_list, C_list = self.kalman_filter.smooth(a_samples.clone(), u.clone())
-
-        # Decode
-        x_recon = self.decode_sequence(a_samples)
+        # Reset LSTM state before running KF on this sequence
+        self.kalman_filter.dyn_params.reset_state()
         
+        # Kalman smoothing
+        (mus_smooth, Sigmas_smooth,
+        mus_filt, Sigmas_filt,
+        mus_pred, Sigmas_pred,
+        A_list, B_list, C_list) = self.kalman_filter.smooth(
+            a_samples.clone(), u.clone(), mask=mask
+        )
+        
+        # Decode
+        x_logits = self.decode_sequence(a_samples)
+        if self.config.out_distr.lower() == "bernoulli":
+            x_recon = torch.sigmoid(x_logits)
+        else:
+            x_recon = x_logits
+
         return {
-            'x_recon': x_recon,
-            'a_samples': a_samples,
-            'a_mu': a_mu,
-            'a_var': a_var,
-            'mus_smooth': mus_smooth,
-            'Sigmas_smooth': Sigmas_smooth,
-            'ABC': (A_list, B_list, C_list),
-            'u': u,
+            "x_recon":       x_recon,
+            "x_logits":      x_logits,
+            "a_samples":     a_samples,
+            "a_mu":          a_mu,
+            "a_var":         a_var,
+            "mus_smooth":    mus_smooth,
+            "Sigmas_smooth": Sigmas_smooth,
+            "mus_filt":      mus_filt,
+            "Sigmas_filt":   Sigmas_filt,
+            "mus_pred":      mus_pred,
+            "Sigmas_pred":   Sigmas_pred,
+            "ABC":           (A_list, B_list, C_list),
+            "u":             u,
         }
+        
     
-    
-    def compute_loss(self, x, outputs, kf_weight=1.0):
+    def compute_loss(self, x, outputs, kf_weight=1.0, vae_weight=1.0, mask=None):
         batch_size, T = x.shape[:2]
 
-        a      = outputs['a_samples']      # [B, T, a_dim]
-        a_mu   = outputs['a_mu']           # [B, T, a_dim]
-        a_var  = outputs['a_var']          # [B, T, a_dim]
+        a      = outputs["a_samples"]
+        a_mu   = outputs["a_mu"]
+        a_var  = outputs["a_var"]
 
-        mus_smooth             = outputs['mus_smooth']
-        Sigmas_smooth          = outputs['Sigmas_smooth']
-        A_list, B_list, C_list = outputs['ABC']
+        mus_smooth             = outputs["mus_smooth"]
+        Sigmas_smooth          = outputs["Sigmas_smooth"]
+        A_list, B_list, C_list = outputs["ABC"]
 
         # Controls
-        if 'u' in outputs:
-            u = outputs['u']
-        else:
-            u = torch.zeros(batch_size, T, self.z_dim, device=x.device, dtype=x.dtype)
-
+        u = outputs.get("u", torch.zeros(batch_size, T, self.u_dim, device=x.device, dtype=x.dtype))
+        
         # Reconstruction distribution p(x | a)
-        x_mu  = outputs['x_recon']                          # [B, T, C, H, W]
-        x_var = torch.tensor(
-            self.config.noise_pixel_var,
-            device=x.device,
-            dtype=x_mu.dtype
-        )
+        x_mu  = outputs.get("x_logits", outputs["x_recon"])
+        x_var = torch.tensor(self.config.noise_pixel_var, device=x.device, dtype=x_mu.dtype)
 
-        #  VAE ELBO
+        # VAE ELBO
         vae_elbo, recon, entropy = vae_loss(
             x, x_mu, x_var,
             a, a_mu, a_var,
             scale_reconstruction=self.config.scale_reconstruction,
+            mask=mask,
+            out_distr=self.config.out_distr,
         )
-
+        
         # Kalman ELBO
         elbo_kf = self.kalman_filter.elbo(
             mus_smooth, Sigmas_smooth,
-            a, u, A_list, B_list, C_list
+            a, u, A_list, B_list, C_list,
+            mask=mask,
         )
 
-        # Combine
-        elbo_total = vae_elbo + kf_weight * elbo_kf     # sum of ELBO contributions
-        loss = -elbo_total                              # minimize negative ELBO
+        # Combine ELBOs
+        elbo_total = vae_weight * vae_elbo + kf_weight * elbo_kf
+        loss = -elbo_total
 
         return {
             "loss": loss,
@@ -181,6 +193,63 @@ class KVAE(nn.Module):
             "elbo_kf": elbo_kf,
             "elbo_vae_total": vae_elbo,
             "recon": recon,
-            "entropy": entropy,
+            "kl": entropy,
         }
 
+    @torch.no_grad()
+    def impute(self, x, mask, u=None):
+        """
+        Impute missing data in sequence x given mask
+        Args:
+            x: Input sequence with missing data [B,T,C,H,W]
+            mask: Observation mask [B,T] (1=observed, 0=missing)
+            u: Control inputs [B,T,u_dim] (optional)
+        Returns:
+            Dictionary with:
+                x_recon: VAE reconstruction from a_samples [B,T,C,H,W]
+                x_imputed: Imputation using smoothed states [B,T,C,H,W]
+                x_filtered: Imputation using filtered states [B,T,C,H,W]
+                a_vae: VAE latent encodings [B,T,a_dim]
+                a_imputed: Imputed latent encodings from smoothed states [B,T,a_dim]
+                a_filtered: Imputed latent encodings from filtered states [B,T,a_dim]
+        """
+        self.eval()
+        device = x.device
+        B, T = x.shape[:2]
+
+        mask = mask.to(device=device, dtype=x.dtype)
+
+        # Forward pass with mask
+        outputs = self.forward(x, u=u, mask=mask)
+
+        a_vae                  = outputs["a_samples"]           # [B,T,a_dim]
+        mus_smooth             = outputs["mus_smooth"]          # [B,T,n]
+        mus_filt               = outputs["mus_filt"]            # [B,T,n]
+        A_list, B_list, C_list = outputs["ABC"]       
+
+        # Baseline decoder reconstruction from original a_samples
+        x_recon_logits = self.decode_sequence(a_vae)       # [B,T,C,H,W]
+        x_recon = torch.sigmoid(x_recon_logits) if self.config.out_distr.lower() == "bernoulli" else x_recon_logits
+
+        # Compute a_imputed = C_t z_{t|1:T}
+        z_smooth = mus_smooth                          # [B,T,n,1]
+        a_imputed = (C_list @ z_smooth).squeeze(-1)    # [B,T,p] 
+        # Uses smoothed latent states (past + future) then decodes.
+        x_imputed_logits  = self.decode_sequence(a_imputed)
+        x_imputed = torch.sigmoid(x_imputed_logits) if self.config.out_distr.lower() == "bernoulli" else x_imputed_logits
+
+        # Compute a_filtered = C_t z_{t|1:t}
+        z_filt = mus_filt                # [B,T,n,1]
+        a_filtered = (C_list @ z_filt).squeeze(-1)     # [B,T,p]
+        # Uses filtered latent states (past only) then decodes (online baseline)
+        x_filtered_logits = self.decode_sequence(a_filtered)
+        x_filtered = torch.sigmoid(x_filtered_logits) if self.config.out_distr.lower() == "bernoulli" else x_filtered_logits
+    
+        return {
+            "x_recon":    x_recon,
+            "x_imputed":  x_imputed,
+            "x_filtered": x_filtered,
+            "a_vae":      a_vae,
+            "a_imputed":  a_imputed,
+            "a_filtered": a_filtered,
+        }

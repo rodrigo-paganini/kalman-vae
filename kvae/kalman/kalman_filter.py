@@ -28,7 +28,7 @@ class KalmanFilter(nn.Module):
         self.register_buffer("Sigma0", Sigma0.clone())  # [n,n]
     
 
-    def filter_step(self, mu_t_t, Sigma_t_t, y_t, u_t, A, B, C):
+    def filter_step(self, mu_t_t, Sigma_t_t, y_t, u_t, A, B, C, mask_t=None):
         # [B,n,n], [B,n,m], [B,p,n]
         batch = y_t.size(0)
 
@@ -48,6 +48,15 @@ class KalmanFilter(nn.Module):
             y_t = y_t.unsqueeze(-1)               # [B,p,1]
         else:
             y_t = y_t                             # [B,p,1]
+
+        # Shape mask 
+        if mask_t is None:
+            mask_t = torch.ones(batch, device=y_t.device, dtype=y_t.dtype)
+        else:
+            mask_t = mask_t.to(device=y_t.device, dtype=y_t.dtype)
+            if mask_t.dim() == 0:
+                mask_t = mask_t.expand(batch)
+        mask_exp = mask_t.view(batch, 1, 1)   
 
         # Prediction step - Compute beliefs at time t given data up to t-1
         Sigma_tprev_tprev = Sigma_t_t       # [B,n,n]
@@ -72,6 +81,9 @@ class KalmanFilter(nn.Module):
         PCT = Sigma_t_tprev @ C.mT
         # [B,n,p] : (solve([B,p,p], [B,n,p].T) -> [B,p,n]).T
         K   = torch.linalg.solve(S, PCT.mT).mT
+        # Apply mask to Kalman gain
+        # For missing values, set to 0 the Kalman gain matrix
+        K = mask_exp * K
 
         # Posterior mean
         # [B,n] = [B,n] + [B,n,p] @ [B,p,1]
@@ -86,15 +98,16 @@ class KalmanFilter(nn.Module):
         return mu_t_t, Sigma_t_t, mu_t_tprev, Sigma_t_tprev, A, B, C
 
 
-    def filter(self, Y, U):
+    def filter(self, Y, U, mask=None):
         """
         The forward pass of the Kalman filter computes the posterior
         at a given t given the observations up to time t.
         p(z_t | y_1:t, u_1:t) = N(z_t| mu_t,t-1 , Sigma_t,t-1)
         NOTE: if the LGSSM is fixed we can use batch solver
         Args:
-            Y: [B,T,p] observations
-            U: [B,T,m] controls
+            Y:    [B,T,p] observations
+            U:    [B,T,m] controls
+            mask: [B, T] with 1 = observed, 0 = missing
         Returns:
             mus_filt:    [B,T,n] filtered means (mu_t,t)
             Sigmas_filt: [B,T,n,n] filtered covariances (Sigma_t,t)
@@ -104,6 +117,14 @@ class KalmanFilter(nn.Module):
         batch, T, _ = Y.shape
         mu    = self.mu0.expand(batch, -1)            # [B,n]
         Sigma = self.Sigma0.expand(batch, -1, -1)     # [B,n,n]
+
+        # Mask shape
+        if mask is None:
+            mask_tens = torch.ones(batch, T, device=Y.device, dtype=Y.dtype)
+        else:
+            mask_tens = mask.to(device=Y.device, dtype=Y.dtype)
+            if mask_tens.shape != (batch, T):
+                mask_tens = mask_tens.view(batch, T)
 
         # Get initial A, B, C matrices NOTE: using zeros as priming input
         A, B, C = self.dyn_params.compute_step(torch.zeros((batch, self.p), device=Y.device, dtype=Y.dtype))
@@ -119,9 +140,12 @@ class KalmanFilter(nn.Module):
             # Get current observation and control
             y_t = Y[:, t]
             u_t = U[:, t]
+            m_t = mask_tens[:, t]
             
             # Compute filter step
-            mu_t_t, Sigma_t_t, mu_t_tprev, Sigma_t_tprev, _, _, _ = self.filter_step(mu, Sigma, y_t, u_t, A, B, C)
+            mu_t_t, Sigma_t_t, mu_t_tprev, Sigma_t_tprev, _, _, _ = self.filter_step(
+                mu, Sigma, y_t, u_t, A, B, C, mask_t=m_t
+            )
 
             # Store results
             mus_filt.append(mu_t_t)
@@ -134,13 +158,23 @@ class KalmanFilter(nn.Module):
 
             # Update for next step
             mu, Sigma = mu_t_t, Sigma_t_t
+
             # Compute A, B, C at time t (to be used at next step)
-            A, B, C = self.dyn_params.compute_step(y_t)  
+            y_pred = (C @ mu_t_tprev).squeeze(-1)
+            m_col = m_t.view(batch, 1)
+            y_for_dyn = m_col * y_t + (1.0 - m_col) * y_pred
+            A, B, C = self.dyn_params.compute_step(y_for_dyn)  
 
-
-        return torch.stack(mus_filt, 1), torch.stack(Sigmas_filt, 1), torch.stack(mus_pred, 1), torch.stack(Sigmas_pred, 1), \
-                    torch.stack(A_list, 1), torch.stack(B_list, 1), torch.stack(C_list, 1)
-
+        return (
+            torch.stack(mus_filt, 1),
+            torch.stack(Sigmas_filt, 1),
+            torch.stack(mus_pred, 1),
+            torch.stack(Sigmas_pred, 1),
+            torch.stack(A_list, 1),
+            torch.stack(B_list, 1),
+            torch.stack(C_list, 1),
+        )
+    
 
     def smooth_step(self, Sigma_t_t, Sigma_tpost_t, Sigma_tpost_T,
                       mu_t_t, mu_tpost_t, mu_tpost_T, A):
@@ -172,14 +206,14 @@ class KalmanFilter(nn.Module):
         return mu_tpost_T, Sigma_tpost_T    
 
 
-    def smooth(self, Y, U):
+    def smooth(self, Y, U, mask=None):
         """
 
         """
         batch, T, _ = Y.shape
 
         # First run the filter to get filtered and predicted estimates
-        mus_filt, Sigmas_filt, mus_pred, Sigmas_pred, A_list, B_list, C_list = self.filter(Y, U)
+        mus_filt, Sigmas_filt, mus_pred, Sigmas_pred, A_list, B_list, C_list = self.filter(Y, U, mask=mask)
 
         # Initialize smoothing with last filtered estimate
         # mu_T-1|T-1, Sigma_T-1|T-1 
@@ -188,6 +222,7 @@ class KalmanFilter(nn.Module):
         mus_smooth = [mu_T]
         Sigmas_smooth = [Sigma_T]
         for t in range(T-2, -1, -1):      # t = T-2, …, 0
+            A_t = A_list[:, t+1]
             mu_t_T, Sigma_t_T = self.smooth_step(
                 Sigmas_filt[:, t],  # Sigma_t_t
                 Sigmas_pred[:, t+1],# Sigma_tpost_t
@@ -195,7 +230,7 @@ class KalmanFilter(nn.Module):
                 mus_filt[:, t],     # mu_t_t
                 mus_pred[:, t+1],   # mu_tpost_t
                 mu_T,               # mu_tpost_T
-                A_list[:, t]      # A_t
+                A_t                 # A_t 
                 )
             # Update for next step
             mu_T, Sigma_T = mu_t_T, Sigma_t_T
@@ -203,9 +238,16 @@ class KalmanFilter(nn.Module):
             mus_smooth.append(mu_t_T)
             Sigmas_smooth.append(Sigma_t_T)
 
-        mus_smooth.reverse()
-        Sigmas_smooth.reverse()
-        return torch.stack(mus_smooth, 1), torch.stack(Sigmas_smooth, 1), A_list, B_list, C_list
+        # Reverse to restore chronological order (0 ... T-1)
+        mus_smooth    = torch.stack(list(reversed(mus_smooth)), 1)     # [B,T,n]
+        Sigmas_smooth = torch.stack(list(reversed(Sigmas_smooth)), 1)  # [B,T,n,n]
+
+        return (
+            mus_smooth, Sigmas_smooth,
+            mus_filt, Sigmas_filt,
+            mus_pred, Sigmas_pred,
+            A_list, B_list, C_list,
+        )
 
 
     def _safe_cholesky(self, Sigma, max_tries=5, jitter_init=1e-6): #TODO: unsure 
@@ -231,7 +273,7 @@ class KalmanFilter(nn.Module):
         return L
     
 
-    def elbo(self, mu_t_T, Sigma_t_T, y_t, u_t, A_list, B_list, C_list):
+    def elbo(self, mu_t_T, Sigma_t_T, y_t, u_t, A_list, B_list, C_list, mask=None):
         """
         Compute the Evidence Lower Bound (ELBO)
         Args:
@@ -239,12 +281,21 @@ class KalmanFilter(nn.Module):
             Sigma_t_T:  [B,T,n,n] smoothed covariances
             y_t:        [B,T,p]   observations
             u_t:        [B,T,m]   controls
+            mask:       [B,T]     with 1 = observed, 0 = missing
         Returns:
-            elbo:       [B]       ELBO per batch element
+            elbo:       scalar    ELBO averaged over batch
         """
         # TODO: review dimensions
         B = y_t.size(0)
         T = y_t.size(1)
+
+        # Observation mask
+        if mask is None:
+            mask_tens = torch.ones(B, T, device=y_t.device, dtype=y_t.dtype)
+        else:
+            mask_tens = mask.to(device=y_t.device, dtype=y_t.dtype)
+            if mask_tens.shape != (B, T):
+                mask_tens = mask_tens.view(B, T)
 
         # Reshape mu_t_T to [B,T,n]
         if mu_t_T.dim() == 4:
@@ -282,6 +333,9 @@ class KalmanFilter(nn.Module):
         mvn_emiss = MultivariateNormal(zero_p, self.R)
         log_prob_emiss = mvn_emiss.log_prob(y_t - mu_emiss) # [B,T]
 
+        # Mask out missing observations in the emission term
+        log_prob_emiss = log_prob_emiss * mask_tens
+
         # Initial term [B]
         mvn_init = MultivariateNormal(self.mu0, self.Sigma0)
         log_prob_init = mvn_init.log_prob(z_t_samp[:,0,:])
@@ -289,12 +343,12 @@ class KalmanFilter(nn.Module):
         # Entropy term [B,T]
         entropy = -mvn_smooth.log_prob(z_t_samp)
 
-        # ELBO computation as sum per frame 
-        denom = B * T
+        # ELBO computation normalized by total observed frames
+        num_el = mask_tens.sum().clamp(min=1.0)
         elbo = (
             log_prob_trans.sum() +
             log_prob_emiss.sum() +
             log_prob_init.sum() +
             entropy.sum()
-        ) / denom
+        ) / num_el
         return elbo
