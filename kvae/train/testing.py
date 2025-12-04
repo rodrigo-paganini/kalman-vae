@@ -11,6 +11,19 @@ from kvae.model.model import KVAE
 logger = logging.getLogger(__name__)
 
 
+def pre_vidsave_trans(x, index=0):
+    """
+    x: torch.Tensor of shape (B, T, C, H, W)
+
+    Returns:
+        np.ndarray of shape (T, H, W, C) for the first sequence in the batch.
+    """
+    x_seq = x[index].detach().cpu().numpy()  # (T, C, H, W)
+    if x_seq.ndim == 4:
+        x_seq = np.transpose(x_seq, (0, 2, 3, 1))  # (T, H, W, C)
+    return x_seq
+
+
 def _pad_to_block(x, block = 16):
     """Pad H/W to the next multiple of `block` for video codecs."""
     if x.ndim != 4:
@@ -80,18 +93,8 @@ def reconstruct_and_save(
         outputs = model(x)
         x_recon = outputs["x_recon"]      # (B, T, C, H, W)
 
-    # Use only the first sequence in the batch
-    x_true_seq = x[0].detach().cpu().numpy()       # (T, C, H, W)
-    x_recon_seq = x_recon[0].detach().cpu().numpy()
-
-    # Convert (T, C, H, W) -> (T, H, W, C)
-    if x_true_seq.ndim == 4:
-        x_true_seq = np.transpose(x_true_seq, (0, 2, 3, 1))
-    if x_recon_seq.ndim == 4:
-        x_recon_seq = np.transpose(x_recon_seq, (0, 2, 3, 1))
-
-    save_frames(x_true_seq,  str(out_dir / f"{prefix}_true.mp4"))
-    save_frames(x_recon_seq, str(out_dir / f"{prefix}_recon.mp4"))
+    save_frames(pre_vidsave_trans(x[0]),  str(out_dir / f"{prefix}_true.mp4"))
+    save_frames(pre_vidsave_trans(x_recon[0]), str(out_dir / f"{prefix}_recon.mp4"))
 
 
 @torch.no_grad()

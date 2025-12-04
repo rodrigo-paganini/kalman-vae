@@ -30,8 +30,8 @@ training:
   device: cpu
   logdir: runs
   debug: false
-  only_vae_epochs: 5
-  kf_update_epochs: 5
+  pretrain_vae_epochs: 5
+  warmup_epochs: 5
   debug: true  
 
 # Any other user fields are accepted and ignored by default

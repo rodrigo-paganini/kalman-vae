@@ -45,6 +45,11 @@ class KVAEConfig:
     decay_rate: float = 0.85    # decay_rate
     decay_steps: int = 20       # decay_steps
 
+    # Inputation
+    generate_step: int = 5          # Number of steps to generate during imputation
+    t_init_mask: int = 4            # Initial time step to start masking
+    t_steps_mask: int = 12          # Number of steps to mask during imputation
+
     def __post_init__(self):
         if self.u_dim is None:
             self.u_dim = self.z_dim
