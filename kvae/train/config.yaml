@@ -29,9 +29,8 @@ training:
   # device: 'auto'|'cpu'|'cuda'|'mps' - if 'auto', script will prefer cuda, then mps, then cpu
   device: cpu
   logdir: runs
-  debug: false
   pretrain_vae_epochs: 5
   warmup_epochs: 5
-  debug: true  
+  debug_video_plots: false  
 
 # Any other user fields are accepted and ignored by default

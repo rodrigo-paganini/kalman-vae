@@ -112,6 +112,7 @@ def evaluate(model, loader, device, kf_weight=1.0, tb_logger=None):
     if tb_logger:
         tb_logger.log_epoch_metrics(epoch_losses, 'val')
         tb_logger.log_images(batch["images"], outputs["x_recon"])
+        tb_logger.log_video(batch["images"], outputs["x_recon"])
 
     return epoch_losses
 
@@ -239,7 +240,7 @@ def main():
         train_loss = train_metrics["loss"]
         val_loss   = val_metrics["loss"]
 
-        if train_cfg.debug:
+        if train_cfg.debug_video_plots:
             # Kalman prediction test
             kf_mse, mse_naive = kalman_prediction_test(model, val_loader, device, max_batches=5)
             # VAE reconstruction test
@@ -299,7 +300,7 @@ class TrainingConfig:
     device: str = 'auto'
     logdir: str = 'runs'
     T: int = 20
-    debug: bool = False
+    debug_video_plots: bool = False
 
 
 if __name__ == "__main__":
