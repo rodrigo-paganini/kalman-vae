@@ -112,6 +112,8 @@ def evaluate(model, loader, device, kf_weight=1.0, tb_logger=None):
     if tb_logger:
         tb_logger.log_epoch_metrics(epoch_losses, 'val')
         tb_logger.log_images(batch["images"], outputs["x_recon"])
+        tb_logger.log_video(batch["images"], name='val/seq_orig')
+        tb_logger.log_video(outputs["x_recon"], name='val/seq_recon')
 
     return epoch_losses
 
@@ -238,10 +240,12 @@ def main():
 
         train_loss = train_metrics["loss"]
         val_loss   = val_metrics["loss"]
+        inputation_log_msg = ""
 
-        if train_cfg.debug:
+        if train_cfg.add_imputation_plots:
             # Kalman prediction test
             kf_mse, mse_naive = kalman_prediction_test(model, val_loader, device, max_batches=5)
+            inputation_log_msg += f"Kalman pred MSE {kf_mse:.6e} vs naive {mse_naive:.6e}\n\n"
             # VAE reconstruction test
             # Imputation testing on full validation set
             imp_metrics = impute_epoch(
@@ -262,10 +266,8 @@ def main():
 
                 sample = imp_metrics.get("sample", None)
                 if sample is not None:
-                    save_frames(pre_vidsave_trans(sample["x_real"]), Path('./runs/') / f"epoch_{epoch}_real.mp4")
-                    save_frames(pre_vidsave_trans(sample["x_recon"]),    Path('./runs/') / f"epoch_{epoch}_vae_recon.mp4")
-                    save_frames(pre_vidsave_trans(sample["x_imputed"]),  Path('./runs/') / f"epoch_{epoch}_impute_smooth.mp4")
-                    save_frames(pre_vidsave_trans(sample["x_filtered"]), Path('./runs/') / f"epoch_{epoch}_impute_filt.mp4")
+                    tb_logger.log_video(sample["x_filtered"], name="val/seq_impute_filt.mp4")
+                    tb_logger.log_video(sample["x_imputed"], name="val/seq_impute_smooth.mp4")
 
             reconstruct_and_save(model, val_loader, device, runs_dir / "videos", prefix=f"vae_epoch{epoch:03d}")
         # Logging
@@ -275,7 +277,7 @@ def main():
             f"(VAE {train_metrics['elbo_vae_total']:.6f}, KF {train_metrics['elbo_kf']:.6f})\n"
             f"Val loss (min) {val_loss:.6f} "
             f"(VAE {val_metrics['elbo_vae_total']:.6f}, KF {val_metrics['elbo_kf']:.6f})\n"
-            f"Kalman prediction MSE {kf_mse:.6e} vs naive {mse_naive:.6e}\n\n"
+            + inputation_log_msg
         )
         # Checkpointing
         if ckpt_dir:
@@ -299,7 +301,7 @@ class TrainingConfig:
     device: str = 'auto'
     logdir: str = 'runs'
     T: int = 20
-    debug: bool = False
+    add_imputation_plots: bool = False
 
 
 if __name__ == "__main__":
