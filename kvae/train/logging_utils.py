@@ -128,14 +128,13 @@ class TensorBoardLogger:
         exp = self.tb_logger.experiment
         exp.add_images('val/orig', norm(original_batch[:1].detach().cpu()).squeeze(0), num_epoch)
         exp.add_images('val/recon', norm(reconstructed_batch[:1].detach().cpu()).squeeze(0), num_epoch)
-    
-    def log_video(self, original_batch, reconstructed_batch, num_epoch: int = None, fps=4):
+
+    def log_video(self, original_batch, num_epoch: int = None, fps=4, name='val/full_orig_seq'):
         """
         Log image sequences as videos.
         
         Args:
-            original_batch: [B, T, C, H, W] tensor
-            reconstructed_batch: [B, T, C, H, W] tensor
+            video_batch: [B, T, C, H, W] tensor
             num_epoch: Epoch number
             fps: Frames per second for the video
         """
@@ -145,9 +144,7 @@ class TensorBoardLogger:
         exp = self.tb_logger.experiment
         
         # Take first sample: [1, T, C, H, W] and normalize across the sequence
-        orig_vid = norm(original_batch[:1].detach().cpu().view(-1, *original_batch.shape[2:])).view(1, original_batch.shape[1], *original_batch.shape[2:])
-        recon_vid = norm(reconstructed_batch[:1].detach().cpu().view(-1, *reconstructed_batch.shape[2:])).view(1, reconstructed_batch.shape[1], *reconstructed_batch.shape[2:])
+        orig_vid = (original_batch[:1].detach().cpu().view(-1, *original_batch.shape[2:])).view(1, original_batch.shape[1], *original_batch.shape[2:])
         
         # add_video expects [N, T, C, H, W]
-        exp.add_video('val/orig_sequence', orig_vid.tile(1,1,3,1,1), num_epoch, fps=fps)
-        exp.add_video('val/recon_sequence', recon_vid.tile(1,1,3,1,1), num_epoch, fps=fps)
+        exp.add_video(name, orig_vid.tile(1,1,3,1,1), num_epoch, fps=fps)

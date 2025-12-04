@@ -31,6 +31,6 @@ training:
   logdir: runs
   pretrain_vae_epochs: 5
   warmup_epochs: 5
-  debug_video_plots: false  
+  add_imputation_plots: true  
 
 # Any other user fields are accepted and ignored by default
