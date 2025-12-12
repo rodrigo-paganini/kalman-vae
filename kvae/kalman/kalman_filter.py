@@ -80,7 +80,12 @@ class KalmanFilter(nn.Module):
         # [B,n,p] = [B,n,n] @ [B,p,n].T
         PCT = Sigma_t_tprev @ C.mT
         # [B,n,p] : (solve([B,p,p], [B,n,p].T) -> [B,p,n]).T
-        K   = torch.linalg.solve(S, PCT.mT).mT
+        if S.device.type == 'mps':
+            S_cpu = S.cpu()
+            PCT_cpu = PCT.cpu()
+            K = torch.linalg.solve(S_cpu, PCT_cpu.mT).mT.to(S.device)
+        else:
+            K = torch.linalg.solve(S, PCT.mT).mT
         # Apply mask to Kalman gain
         # For missing values, set to 0 the Kalman gain matrix
         K = mask_exp * K
@@ -195,7 +200,13 @@ class KalmanFilter(nn.Module):
         """
         # Smoother gain J_t = Sigma_{t|t} A^T (Sigma_{t+1|t})^{-1}
         # [B,n,n] 
-        J_t = torch.linalg.solve(Sigma_tpost_t.mT, (Sigma_t_t @ A.mT).mT).mT
+        # WORKAROUND for MPS bug
+        if Sigma_tpost_t.device.type == 'mps':
+            Sigma_tpost_t_cpu = Sigma_tpost_t.cpu()
+            temp_cpu = (Sigma_t_t @ A.mT).cpu()
+            J_t = torch.linalg.solve(Sigma_tpost_t_cpu.mT, temp_cpu.mT).mT.to(Sigma_tpost_t.device)
+        else:
+            J_t = torch.linalg.solve(Sigma_tpost_t.mT, (Sigma_t_t @ A.mT).mT).mT
         # Smoothed mean
         # [B,n] + [B,n] <- ([B,n,n] @ [B,n,1]) 
         mu_tpost_T = mu_t_t + (J_t @ (mu_tpost_T - mu_tpost_t))
@@ -219,8 +230,10 @@ class KalmanFilter(nn.Module):
         # mu_T-1|T-1, Sigma_T-1|T-1 
         mu_T, Sigma_T = mus_filt[:, -1], Sigmas_filt[:, -1]
 
-        mus_smooth = [mu_T]
-        Sigmas_smooth = [Sigma_T]
+        mus_smooth = torch.zeros_like(mus_filt)
+        mus_smooth[:, -1] = mu_T
+        Sigmas_smooth = torch.zeros_like(Sigmas_filt)
+        Sigmas_smooth[:, -1] = Sigma_T
         for t in range(T-2, -1, -1):      # t = T-2, …, 0
             A_t = A_list[:, t+1]
             mu_t_T, Sigma_t_T = self.smooth_step(
@@ -235,12 +248,8 @@ class KalmanFilter(nn.Module):
             # Update for next step
             mu_T, Sigma_T = mu_t_T, Sigma_t_T
             # Store results
-            mus_smooth.append(mu_t_T)
-            Sigmas_smooth.append(Sigma_t_T)
-
-        # Reverse to restore chronological order (0 ... T-1)
-        mus_smooth    = torch.stack(list(reversed(mus_smooth)), 1)     # [B,T,n]
-        Sigmas_smooth = torch.stack(list(reversed(Sigmas_smooth)), 1)  # [B,T,n,n]
+            mus_smooth[:, t] = mu_t_T
+            Sigmas_smooth[:, t] = Sigma_t_T
 
         return (
             mus_smooth, Sigmas_smooth,

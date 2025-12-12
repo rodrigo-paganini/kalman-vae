@@ -21,15 +21,15 @@ transforms:
 
 training:
   seed: 10
-  max_epochs: 20
+  max_epochs: 100
   batch_size: 32
-  lr: 0.001
+  lr: 0.007
   ckpt_every: 5
   gpus: 1
   # device: 'auto'|'cpu'|'cuda'|'mps' - if 'auto', script will prefer cuda, then mps, then cpu
   device: cpu
   logdir: runs
-  pretrain_vae_epochs: 5
+  pretrain_vae_epochs: 0
   warmup_epochs: 5
   add_imputation_plots: true  
 

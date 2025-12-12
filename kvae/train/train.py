@@ -52,9 +52,6 @@ def train_one_epoch(model, loader, optimizer, device, grad_clip_norm, scheduler=
 
         optimizer.step()
 
-        if scheduler is not None:
-            scheduler.step()
-
         total_loss += float(loss.detach())
         total_kf   += float(elbo_kf.detach())
         total_vae  += float(elbo_vae_tot.detach())
@@ -111,7 +108,8 @@ def evaluate(model, loader, device, kf_weight=1.0, tb_logger=None):
 
     if tb_logger:
         tb_logger.log_epoch_metrics(epoch_losses, 'val')
-        tb_logger.log_images(batch["images"], outputs["x_recon"])
+        tb_logger.log_image(batch["images"], name='val/orig')
+        tb_logger.log_image(outputs["x_recon"], name='val/recon')
         tb_logger.log_video(batch["images"], name='val/seq_orig')
         tb_logger.log_video(outputs["x_recon"], name='val/seq_recon')
 
@@ -204,10 +202,8 @@ def main():
     optimizer = torch.optim.Adam(model.parameters(), lr=train_cfg.lr, weight_decay=train_cfg.weight_decay)
     num_batches = len(train_loader)
     # LR decays every (decay_steps * num_batches) updates
-    step_size = cfg.decay_steps * num_batches  
-    scheduler = torch.optim.lr_scheduler.StepLR(
+    scheduler = torch.optim.lr_scheduler.ExponentialLR(
         optimizer,
-        step_size=step_size,
         gamma=cfg.decay_rate,   
     )
 
@@ -233,6 +229,8 @@ def main():
         train_metrics = train_one_epoch(
             model, train_loader, optimizer, device, cfg.grad_clip_norm, scheduler, kf_weight, vae_weight, tb_logger
         )
+        if scheduler is not None and epoch % cfg.decay_steps == 0:
+            scheduler.step()
         # Evaluate on fully observed data
         val_metrics   = evaluate(
             model, val_loader, device, kf_weight, tb_logger
@@ -241,6 +239,10 @@ def main():
         train_loss = train_metrics["loss"]
         val_loss   = val_metrics["loss"]
         inputation_log_msg = ""
+
+        # Log learning rate
+        current_lr = optimizer.param_groups[0]['lr']
+        tb_logger.log_scalar('train/learning_rate', current_lr, num_epoch=epoch)
 
         if train_cfg.add_imputation_plots:
             # Kalman prediction test
@@ -266,9 +268,14 @@ def main():
 
                 sample = imp_metrics.get("sample", None)
                 if sample is not None:
-                    tb_logger.log_video(sample["x_filtered"], name="val/seq_impute_filt.mp4")
-                    tb_logger.log_video(sample["x_imputed"], name="val/seq_impute_smooth.mp4")
-
+                    tb_logger.log_image(sample["x_real"], name="val_inputation/seq_impute_real")
+                    tb_logger.log_image(sample["x_recon"], name="val_inputation/seq_impute_recon")
+                    tb_logger.log_image(sample["x_filtered"], name="val_inputation/seq_impute_filt")
+                    tb_logger.log_image(sample["x_imputed"], name="val_inputation/seq_impute_smooth")
+                    tb_logger.log_video(sample["x_real"], name="val_inputation/seq_impute_real.mp4")
+                    tb_logger.log_video(sample["x_recon"], name="val_inputation/seq_impute_recon.mp4")
+                    tb_logger.log_video(sample["x_filtered"], name="val_inputation/seq_impute_filt.mp4")
+                    tb_logger.log_video(sample["x_imputed"], name="val_inputation/seq_impute_smooth.mp4")
             reconstruct_and_save(model, val_loader, device, runs_dir / "videos", prefix=f"vae_epoch{epoch:03d}")
         # Logging
         logger.info(

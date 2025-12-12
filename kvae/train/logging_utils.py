@@ -113,21 +113,20 @@ class TensorBoardLogger:
             value: Scalar value (tensor or float)
             step: Optional step override. If None, uses internal global_step (without incrementing)
         """
-        if step is None:
-            step = self.global_step
+        if num_epoch is None:
+            num_epoch = self.global_epoch
         
         if hasattr(value, 'item'):
             value = value.item()
         
         self.tb_logger.log_metrics({name: value}, step=num_epoch)
 
-    def log_images(self, original_batch, reconstructed_batch, num_epoch: int = None):
+    def log_image(self, original_batch, name, num_epoch: int = None):
         if num_epoch is None:
             num_epoch = self.global_epoch
 
         exp = self.tb_logger.experiment
-        exp.add_images('val/orig', norm(original_batch[:1].detach().cpu()).squeeze(0), num_epoch)
-        exp.add_images('val/recon', norm(reconstructed_batch[:1].detach().cpu()).squeeze(0), num_epoch)
+        exp.add_images(name, norm(original_batch[:1].detach().cpu()).squeeze(0), num_epoch)
 
     def log_video(self, original_batch, num_epoch: int = None, fps=4, name='val/full_orig_seq'):
         """
