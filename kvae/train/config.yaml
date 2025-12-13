@@ -30,7 +30,7 @@ training:
   device: cpu
   logdir: runs
   pretrain_vae_epochs: 0
-  warmup_epochs: 5
+  warmup_epochs: 10
   add_imputation_plots: true  
 
 # Any other user fields are accepted and ignored by default
