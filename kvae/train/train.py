@@ -1,5 +1,7 @@
 import logging
+from multiprocessing import process
 import random
+from venv import logger
 import numpy as np
 from pathlib import Path
 import torch
@@ -108,11 +110,10 @@ def evaluate(model, loader, device, kf_weight=1.0, tb_logger=None):
 
     if tb_logger:
         tb_logger.log_epoch_metrics(epoch_losses, 'val')
-        tb_logger.log_image(batch["images"], name='val/orig')
-        tb_logger.log_image(outputs["x_recon"], name='val/recon')
-        tb_logger.log_video(batch["images"], name='val/seq_orig')
-        tb_logger.log_video(outputs["x_recon"], name='val/seq_recon')
-
+        tb_logger.log_image(batch["images"][:1], name='val/orig')
+        tb_logger.log_image(outputs["x_recon"][:1], name='val/recon')
+        tb_logger.log_video(batch["images"][:1], name='val/seq_orig')
+        tb_logger.log_video(outputs["x_recon"][:1], name='val/seq_recon')
     return epoch_losses
 
 
@@ -244,7 +245,7 @@ def main():
         current_lr = optimizer.param_groups[0]['lr']
         tb_logger.log_scalar('train/learning_rate', current_lr, num_epoch=epoch)
 
-        if train_cfg.add_imputation_plots:
+        if train_cfg.add_imputation_plots and epoch % 5 == 0:
             # Kalman prediction test
             kf_mse, mse_naive = kalman_prediction_test(model, val_loader, device, max_batches=5)
             inputation_log_msg += f"Kalman pred MSE {kf_mse:.6e} vs naive {mse_naive:.6e}\n\n"
@@ -268,15 +269,16 @@ def main():
 
                 sample = imp_metrics.get("sample", None)
                 if sample is not None:
-                    tb_logger.log_image(sample["x_real"], name="val_inputation/seq_impute_real")
-                    tb_logger.log_image(sample["x_recon"], name="val_inputation/seq_impute_recon")
-                    tb_logger.log_image(sample["x_filtered"], name="val_inputation/seq_impute_filt")
-                    tb_logger.log_image(sample["x_imputed"], name="val_inputation/seq_impute_smooth")
-                    tb_logger.log_video(sample["x_real"], name="val_inputation/seq_impute_real.mp4")
-                    tb_logger.log_video(sample["x_recon"], name="val_inputation/seq_impute_recon.mp4")
-                    tb_logger.log_video(sample["x_filtered"], name="val_inputation/seq_impute_filt.mp4")
-                    tb_logger.log_video(sample["x_imputed"], name="val_inputation/seq_impute_smooth.mp4")
-            reconstruct_and_save(model, val_loader, device, runs_dir / "videos", prefix=f"vae_epoch{epoch:03d}")
+                    tb_logger.log_image(sample["x_real"][:1], name="val_inputation/seq_impute_real")
+                    tb_logger.log_image(sample["x_recon"][:1], name="val_inputation/seq_impute_recon")
+                    tb_logger.log_image(sample["x_filtered"][:1], name="val_inputation/seq_impute_filt")
+                    tb_logger.log_image(sample["x_imputed"][:1], name="val_inputation/seq_impute_smooth")
+
+                    tb_logger.log_video(sample["x_real"][:1], name="val_inputation/seq_impute_real.mp4")
+                    tb_logger.log_video(sample["x_recon"][:1], name="val_inputation/seq_impute_recon.mp4")
+                    tb_logger.log_video(sample["x_filtered"][:1], name="val_inputation/seq_impute_filt.mp4")
+                    tb_logger.log_video(sample["x_imputed"][:1], name="val_inputation/seq_impute_smooth.mp4")
+            # reconstruct_and_save(model, val_loader, device, runs_dir / "videos", prefix=f"vae_epoch{epoch:03d}")
         # Logging
         logger.info(
             f"Epoch {epoch:03d} [phase={phase}]\n"
