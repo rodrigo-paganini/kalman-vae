@@ -25,6 +25,23 @@ def test_deterministic_forward_with_seed():
     assert torch.allclose(out1['x_recon_mu'], out2['x_recon_mu'], atol=1e-6), "Forward is not deterministic with fixed seed"
 
 
+def test_deterministic_forward_with_seed_gaussian():
+    '''
+    Test that VAE forward doesn't change over time. If VAE behavior changes,
+    update `tests/fixtures/out1.pt` with the new output.
+    '''
+    cfg = KVAEConfig(out_distr="gaussian")
+    torch.manual_seed(1234)
+    vae1 = VAE(cfg)
+    x1 = _make_dummy_batch(cfg, B=2, T=3)
+    out1 = vae1(x1)
+
+    out2 = torch.load('tests/fixtures/out1_bernoulli.pt')
+
+    assert out1['x_recon_mu'].shape == out2['x_recon_mu'].shape, "Output shape has changed. Update the fixture if this is intentional."
+    assert torch.allclose(out1['x_recon_mu'], out2['x_recon_mu'], atol=1e-6), "Output values have changed. Update the fixture if this is intentional."
+
+
 def test_deterministic_forward_with_seed():
     '''
     Test that VAE forward doesn't change over time. If VAE behavior changes,
@@ -79,4 +96,18 @@ def test_forward_backward_and_parameter_update():
     assert changed, "Optimizer step did not change model parameters"
 
 
-test_deterministic_forward_with_seed()
+def update_fixture():
+    '''
+    Utility function to update the saved fixture output.
+    NEVER call this function during normal testing! It's just an auxiliary function to call when fixtures 
+    need to be updated.
+    Run this if VAE behavior changes intentionally.
+    '''
+    cfg = KVAEConfig(out_distr="gaussian")
+    torch.manual_seed(1234)
+    vae1 = VAE(cfg)
+    x1 = _make_dummy_batch(cfg, B=2, T=3)
+    out1 = vae1(x1)
+
+    with open('tests/fixtures/out1_gaussian.pt', 'wb') as f:
+        torch.save(out1, f)

@@ -177,7 +177,7 @@ class VAE(nn.Module):
         x_recon_var = torch.tensor(self.config.noise_pixel_var, device=x.device, dtype=x_recon_mu.dtype)
 
         # reshape back
-        x_recon = x_recon_mu.view(B, T, *x_recon_mu.shape[1:])
+        x_recon = x_recon.view(B, T, *x_recon.shape[1:])
         x_recon_mu = x_recon_mu.view(B, T, *x_recon_mu.shape[1:])
         mu = mu.view(B, T, -1)
         var = var.view(B, T, -1)
