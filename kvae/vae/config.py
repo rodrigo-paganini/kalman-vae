@@ -34,6 +34,12 @@ class KVAEConfig:
     noise_pixel_var: float = 0.1
     scale_reconstruction: float = 0.3
 
+    # Beta scheduling for KL term
+    scheduled_beta: bool = True
+    start_epoch: int = 0
+    end_epoch: int = 5
+    start_val: float = 0.0
+    end_val: float = 1.0
     # Alpha / dynamics network (alpha_rnn=True, alpha_units=50)
     dynamics_hidden_dim: int = 50      # LSTM hidden size ~ alpha_units
 

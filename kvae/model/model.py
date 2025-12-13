@@ -4,7 +4,7 @@ import torch
 from kvae.vae.vae import Encoder, Decoder
 from kvae.kalman.kalman_filter import KalmanFilter
 from kvae.kalman.dyn_param import DynamicsParameter
-from kvae.vae.losses import vae_loss
+from kvae.vae.losses import vae_loss, count_active_units, LinearScheduler
 
 
 class KVAE(nn.Module):
@@ -20,6 +20,8 @@ class KVAE(nn.Module):
         # VAE components
         self.encoder = Encoder(config)
         self.decoder = Decoder(config)
+        self.scheduler = LinearScheduler(config)
+        self.beta = self.scheduler.get_beta(0) if config.scheduled_beta else 1.0
         
         # Dynamics parameter network
         self.K = config.num_modes
@@ -174,6 +176,7 @@ class KVAE(nn.Module):
             scale_reconstruction=self.config.scale_reconstruction,
             mask=mask,
             out_distr=self.config.out_distr,
+            beta=self.beta,
         )
         
         # Kalman ELBO
@@ -187,6 +190,9 @@ class KVAE(nn.Module):
         elbo_total = vae_weight * vae_elbo + kf_weight * elbo_kf
         loss = -elbo_total
 
+        # Count active units in VAE latent space
+        active_units, variances = count_active_units(a_mu)
+
         return {
             "loss": loss,
             "elbo_total": elbo_total,
@@ -194,6 +200,9 @@ class KVAE(nn.Module):
             "elbo_vae_total": vae_elbo,
             "recon": recon,
             "kl": entropy,
+            'active_units': active_units,
+            'latent_var_0': variances[0].item(),
+            'latent_var_1': variances[1].item(),
         }
 
     @torch.no_grad()

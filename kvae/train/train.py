@@ -18,12 +18,13 @@ from kvae.train.testing import reconstruct_and_save, kalman_prediction_test, pre
 
 
 def train_one_epoch(model, loader, optimizer, device, grad_clip_norm, scheduler=None, kf_weight=1.0,
-                   vae_weight=1.0, tb_logger=None):
+                   vae_weight=1.0, tb_logger=None, epoch : int = None):
     model.train()
     total_loss = 0.0
     total_vae  = 0.0
     total_kf   = 0.0
     n_batches  = 0
+    model.beta = model.scheduler.get_beta(epoch) if model.config.scheduled_beta else 1.0
 
     for batch in loader:
         # Reset Kalman LSTM state at the start of each sequence
@@ -39,7 +40,8 @@ def train_one_epoch(model, loader, optimizer, device, grad_clip_norm, scheduler=
         # Forward + loss
         optimizer.zero_grad(set_to_none=True)
         outputs = model(x, mask=mask)
-        losses = model.compute_loss(x, outputs, kf_weight=kf_weight, vae_weight=vae_weight, mask=mask)
+        losses = model.compute_loss(x, outputs, kf_weight=kf_weight, vae_weight=vae_weight,
+                                    mask=mask)
 
         loss         = losses["loss"]
         elbo_kf      = losses["elbo_kf"]
@@ -62,6 +64,7 @@ def train_one_epoch(model, loader, optimizer, device, grad_clip_norm, scheduler=
         "loss":           total_loss / denom,
         "elbo_kf":        total_kf   / denom,
         "elbo_vae_total": total_vae  / denom,
+        "active_units":   losses["active_units"]
     }
 
     if tb_logger is not None:
@@ -76,6 +79,8 @@ def evaluate(model, loader, device, kf_weight=1.0, tb_logger=None):
     total_loss = 0.0
     total_vae  = 0.0
     total_kf   = 0.0
+    active_units = 0.0
+    latent_vars = [0.0, 0.0]
     n_batches  = 0
 
     for batch in tqdm(loader, desc="Evaluating:"):
@@ -97,6 +102,9 @@ def evaluate(model, loader, device, kf_weight=1.0, tb_logger=None):
         total_loss += loss.detach()
         total_kf   += elbo_kf.detach()
         total_vae  += elbo_vae_tot.detach()
+        active_units += losses["active_units"]
+        latent_vars[0] += losses["latent_var_0"]
+        latent_vars[1] += losses["latent_var_1"]
         n_batches  += 1
 
     denom = max(n_batches, 1)
@@ -106,8 +114,16 @@ def evaluate(model, loader, device, kf_weight=1.0, tb_logger=None):
         "elbo_vae_total": total_vae / denom,
     }
 
+    training_vae = {
+        "active_units":   active_units / denom, # ToDo: Cambiarlo de Lugar
+        "latent_vars_0":   latent_vars[0] / denom,
+        "latent_vars_1": latent_vars[1] / denom,
+        "beta_scheduler": model.beta,
+    }
+
     if tb_logger:
         tb_logger.log_epoch_metrics(epoch_losses, 'val')
+        tb_logger.log_epoch_metrics(training_vae, 'val')
         tb_logger.log_image(batch["images"], name='val/orig')
         tb_logger.log_image(outputs["x_recon"], name='val/recon')
         tb_logger.log_video(batch["images"], name='val/seq_orig')
@@ -227,7 +243,7 @@ def main():
             logger.info(f"\n=== Switched to training phase '{phase}' at epoch {epoch} ===")
 
         train_metrics = train_one_epoch(
-            model, train_loader, optimizer, device, cfg.grad_clip_norm, scheduler, kf_weight, vae_weight, tb_logger
+            model, train_loader, optimizer, device, cfg.grad_clip_norm, scheduler, kf_weight, vae_weight, tb_logger, epoch = epoch
         )
         if scheduler is not None and epoch % cfg.decay_steps == 0:
             scheduler.step()
@@ -304,7 +320,7 @@ class TrainingConfig:
     weight_decay: float = 0.0
     ckpt_every: int = 5
     pretrain_vae_epochs: int = 5  
-    warmup_epochs: int = 5
+    warmup_epochs: int = 10
     device: str = 'auto'
     logdir: str = 'runs'
     T: int = 20
