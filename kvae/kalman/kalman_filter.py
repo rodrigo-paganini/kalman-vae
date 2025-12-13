@@ -131,8 +131,8 @@ class KalmanFilter(nn.Module):
             if mask_tens.shape != (batch, T):
                 mask_tens = mask_tens.view(batch, T)
 
-        # Get initial A, B, C matrices NOTE: using zeros as priming input
-        A, B, C = self.dyn_params.compute_step(torch.zeros((batch, self.p), device=Y.device, dtype=Y.dtype))
+        # Get initial A, B, C matrices NOTE: using zeros as priming input # TODO
+        A, B, C = self.dyn_params.compute_batch(torch.zeros((batch, self.p), device=Y.device, dtype=Y.dtype))
 
         A_list = []
         B_list = []
@@ -143,6 +143,7 @@ class KalmanFilter(nn.Module):
         Sigmas_pred = []
         for t in range(T):
             # Get current observation and control
+            A, B, C = A[:, t], B[:, t], C[:, t]   # TODO refactor
             y_t = Y[:, t]
             u_t = U[:, t]
             m_t = mask_tens[:, t]
@@ -168,7 +169,7 @@ class KalmanFilter(nn.Module):
             y_pred = (C @ mu_t_tprev).squeeze(-1)
             m_col = m_t.view(batch, 1)
             y_for_dyn = m_col * y_t + (1.0 - m_col) * y_pred
-            A, B, C = self.dyn_params.compute_step(y_for_dyn)  
+            # A, B, C = self.dyn_params.compute_step(y_for_dyn)   # TODO refactor
 
         return (
             torch.stack(mus_filt, 1),
@@ -282,7 +283,7 @@ class KalmanFilter(nn.Module):
         return L
     
 
-    def elbo(self, mu_t_T, Sigma_t_T, y_t, u_t, A_list, B_list, C_list, mask=None):
+    def elbo(self, mu_t_T, Sigma_t_T, y_t, u_t, A_list, B_list, C_list, log_q, mask=None):
         """
         Compute the Evidence Lower Bound (ELBO)
         Args:
@@ -348,6 +349,7 @@ class KalmanFilter(nn.Module):
         # Initial term [B]
         mvn_init = MultivariateNormal(self.mu0, self.Sigma0)
         log_prob_init = mvn_init.log_prob(z_t_samp[:,0,:])
+        log_qseq, log_pseq = self.dynamics_parameter.elbo_terms()
 
         # Entropy term [B,T]
         entropy = -mvn_smooth.log_prob(z_t_samp)
@@ -355,9 +357,15 @@ class KalmanFilter(nn.Module):
         # ELBO computation normalized by total observed frames
         num_el = mask_tens.sum().clamp(min=1.0)
         elbo = (
+            # The code `log_prob_trans` appears to be a function or variable name in Python. Without
+            # seeing the implementation of the function or how the variable is used in the code, it is
+            # difficult to determine its exact purpose. If you provide more context or the code
+            # implementation, I can help explain what it does.
             log_prob_trans.sum() +
             log_prob_emiss.sum() +
             log_prob_init.sum() +
+            log_qseq.sum() +
+            log_pseq.sum() +
             entropy.sum()
         ) / num_el
         return elbo
