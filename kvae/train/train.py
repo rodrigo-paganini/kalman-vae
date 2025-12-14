@@ -135,16 +135,21 @@ def set_training_phase(model, phase: str):
         dyn.B.requires_grad = False
         dyn.C.requires_grad = False
 
-        if dyn.K > 1:
-            if hasattr(dyn, "lstm"):
-                for p in dyn.lstm.parameters():
-                    p.requires_grad = False
-            if hasattr(dyn, "mlp"):
-                for p in dyn.mlp.parameters():
-                    p.requires_grad = False
-            if hasattr(dyn, "head_w"):
-                for p in dyn.head_w.parameters():
-                    p.requires_grad = False
+        if dyn.use_switching_dynamics:
+            # Freeze regime posterior during VAE pretrain
+            for p in dyn.markov_regime_posterior.parameters():
+                p.requires_grad = False
+        else:
+            if dyn.K > 1:
+                if hasattr(dyn, "lstm"):
+                    for p in dyn.lstm.parameters():
+                        p.requires_grad = False
+                if hasattr(dyn, "mlp"):
+                    for p in dyn.mlp.parameters():
+                        p.requires_grad = False
+                if hasattr(dyn, "head_w"):
+                    for p in dyn.head_w.parameters():
+                        p.requires_grad = False
 
     # Warmup: train VAE + global A,B,C (mixture weights frozen)
     elif phase == "warmup":
@@ -154,19 +159,25 @@ def set_training_phase(model, phase: str):
 
         dyn.A.requires_grad = True
         dyn.B.requires_grad = True
+        if hasattr(dyn, "Q"):
+            dyn.Q.requires_grad = True
         dyn.C.requires_grad = True
 
-        # Keep dynamics network (mixture) frozen in warmup
-        if dyn.K > 1:
-            if hasattr(dyn, "lstm"):
-                for p in dyn.lstm.parameters():
-                    p.requires_grad = False
-            if hasattr(dyn, "mlp"):
-                for p in dyn.mlp.parameters():
-                    p.requires_grad = False
-            if hasattr(dyn, "head_w"):
-                for p in dyn.head_w.parameters():
-                    p.requires_grad = False
+        # Keep regime network frozen in warmup
+        if getattr(dyn, "use_switching_dynamics", False):
+            for p in dyn.markov_regime_posterior.parameters():
+                p.requires_grad = False
+        else:
+            if dyn.K > 1:
+                if hasattr(dyn, "lstm"):
+                    for p in dyn.lstm.parameters():
+                        p.requires_grad = False
+                if hasattr(dyn, "mlp"):
+                    for p in dyn.mlp.parameters():
+                        p.requires_grad = False
+                if hasattr(dyn, "head_w"):
+                    for p in dyn.head_w.parameters():
+                        p.requires_grad = False
 
     # Fine-tune everything
     elif phase == "all":
@@ -232,6 +243,9 @@ def main():
         )
         if scheduler is not None and epoch % cfg.decay_steps == 0:
             scheduler.step()
+        if cfg.use_switching_dynamics and epoch % cfg.tau_decay_steps == 0:
+            dyn = model.kalman_filter.dyn_params
+            dyn.tau = max(1e-3, dyn.tau * cfg.tau_decay_rate)
         # Evaluate on fully observed data
         val_metrics   = evaluate(
             model, val_loader, device, kf_weight, tb_logger
@@ -244,6 +258,8 @@ def main():
         # Log learning rate
         current_lr = optimizer.param_groups[0]['lr']
         tb_logger.log_scalar('train/learning_rate', current_lr, num_epoch=epoch)
+        if cfg.use_switching_dynamics:
+            tb_logger.log_scalar('train/tau', model.kalman_filter.dyn_params.tau, num_epoch=epoch)
 
         if train_cfg.add_imputation_plots and epoch % 5 == 0:
             # Kalman prediction test

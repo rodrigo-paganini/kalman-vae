@@ -5,7 +5,7 @@ dataset:
   # 'toy' or 'pymunk'
   type: pymunk
   # for 'pymunk' sets path to the .npz file containing 'images' and 'state'
-  path: /Users/rodrigopaganini/master/data/pgm/kvae/box.npz
+  path: /home/daniel/Documents/MVA/PGM/box.npz
   num_workers: 6
   val_split: 0.2
 
@@ -30,7 +30,7 @@ training:
   device: cpu
   logdir: runs
   pretrain_vae_epochs: 0
-  warmup_epochs: 10
+  warmup_epochs: 0
   add_imputation_plots: true  
 
 # Any other user fields are accepted and ignored by default

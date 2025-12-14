@@ -28,11 +28,12 @@ class KalmanFilter(nn.Module):
         self.register_buffer("Sigma0", Sigma0.clone())  # [n,n]
     
 
-    def filter_step(self, mu_t_t, Sigma_t_t, y_t, u_t, A, B, C, mask_t=None):
+    def filter_step(self, mu_t_t, Sigma_t_t, y_t, u_t, A, B, C, Q, mask_t=None):
         # [B,n,n], [B,n,m], [B,p,n]
         batch = y_t.size(0)
 
-        Q = self.Q.expand(batch, -1, -1)
+        if Q.dim() == 2:
+            Q = Q.expand(batch, -1, -1)
         R = self.R.expand(batch, -1, -1)
 
         # Inputs: mean and covariance of the filtered believe at t-1
@@ -131,8 +132,14 @@ class KalmanFilter(nn.Module):
             if mask_tens.shape != (batch, T):
                 mask_tens = mask_tens.view(batch, T)
 
-        # Get initial A, B, C matrices NOTE: using zeros as priming input # TODO
-        A, B, C = self.dyn_params.compute_batch(torch.zeros((batch, self.p), device=Y.device, dtype=Y.dtype))
+        use_batch_dyn = self.dyn_params.use_switching_dynamics
+        if use_batch_dyn:
+            A_seq, B_seq, C_seq, Q_seq = self.dyn_params.compute_batch(
+                Y, is_training=self.training
+            )
+        else:
+            A_seq = B_seq = C_seq = Q_seq = None
+            y_for_dyn = torch.zeros((batch, self.p), device=Y.device, dtype=Y.dtype)
 
         A_list = []
         B_list = []
@@ -143,14 +150,21 @@ class KalmanFilter(nn.Module):
         Sigmas_pred = []
         for t in range(T):
             # Get current observation and control
-            A, B, C = A[:, t], B[:, t], C[:, t]   # TODO refactor
+            if use_batch_dyn:
+                A = A_seq[:, t]
+                B = B_seq[:, t]
+                C = C_seq[:, t]
+                Q_t = Q_seq[:, t]
+            else:
+                A, B, C = self.dyn_params.compute_step(y_for_dyn)
+                Q_t = self.Q
             y_t = Y[:, t]
             u_t = U[:, t]
             m_t = mask_tens[:, t]
             
             # Compute filter step
             mu_t_t, Sigma_t_t, mu_t_tprev, Sigma_t_tprev, _, _, _ = self.filter_step(
-                mu, Sigma, y_t, u_t, A, B, C, mask_t=m_t
+                mu, Sigma, y_t, u_t, A, B, C, Q_t, mask_t=m_t
             )
 
             # Store results
@@ -169,7 +183,6 @@ class KalmanFilter(nn.Module):
             y_pred = (C @ mu_t_tprev).squeeze(-1)
             m_col = m_t.view(batch, 1)
             y_for_dyn = m_col * y_t + (1.0 - m_col) * y_pred
-            # A, B, C = self.dyn_params.compute_step(y_for_dyn)   # TODO refactor
 
         return (
             torch.stack(mus_filt, 1),
@@ -283,7 +296,7 @@ class KalmanFilter(nn.Module):
         return L
     
 
-    def elbo(self, mu_t_T, Sigma_t_T, y_t, u_t, A_list, B_list, C_list, log_q, mask=None):
+    def elbo(self, mu_t_T, Sigma_t_T, y_t, u_t, A_list, B_list, C_list, Q_list=None, mask=None):
         """
         Compute the Evidence Lower Bound (ELBO)
         Args:
@@ -291,6 +304,7 @@ class KalmanFilter(nn.Module):
             Sigma_t_T:  [B,T,n,n] smoothed covariances
             y_t:        [B,T,p]   observations
             u_t:        [B,T,m]   controls
+            Q_list:     [B,T,n,n] process noise covariances
             mask:       [B,T]     with 1 = observed, 0 = missing
         Returns:
             elbo:       scalar    ELBO averaged over batch
@@ -307,6 +321,8 @@ class KalmanFilter(nn.Module):
             if mask_tens.shape != (B, T):
                 mask_tens = mask_tens.view(B, T)
 
+        dev, dtp = y_t.device, y_t.dtype
+
         # Reshape mu_t_T to [B,T,n]
         if mu_t_T.dim() == 4:
             mu_t_T = mu_t_T.squeeze(-1)   
@@ -316,8 +332,13 @@ class KalmanFilter(nn.Module):
         if u_t.dim() == 3:
             u_t = u_t.unsqueeze(-1)
 
+        # Process noise
+        if Q_list is None:
+            Q_list = self.dyn_params.Q_seq
+        if Q_list is None:
+            Q_list = self.Q.to(device=dev, dtype=dtp).expand(B, T, -1, -1)
+
         # Sample from the smoothed distribution - to ensure positive definiteness
-        dev, dtp = self.Q.device, self.Q.dtype
         L = self._safe_cholesky(Sigma_t_T)
         mvn_smooth = MultivariateNormal(mu_t_T, scale_tril=L)
         # Sample using reparameterization trick (keep gradients) [B,T,n,1] 
@@ -333,10 +354,13 @@ class KalmanFilter(nn.Module):
         zero_n = torch.zeros(self.n, device=dev, dtype=dtp)
         zero_p = torch.zeros(self.p, device=dev, dtype=dtp)
         mu_trans = (Az + Bu).squeeze(-1)  # [B,T-1,n]
+
+        Q_trans = Q_list[:, 1:]  # [B,T-1,n,n]
+        L_Q = self._safe_cholesky(Q_trans)
         # TODO: why trick with z_t_transition - mu_transition? 
-        mvn_trans = MultivariateNormal(zero_n, self.Q)
+        mvn_trans = MultivariateNormal(zero_n, scale_tril=L_Q.reshape(-1, self.n, self.n))
         # [B,T-1]
-        log_prob_trans = mvn_trans.log_prob((z_t - mu_trans).squeeze(-1)) 
+        log_prob_trans = mvn_trans.log_prob((z_t - mu_trans).reshape(-1, self.n)).view(B, T-1)
 
         # Emission likelihood - prod_{t=1}^T p(y_t|z_t) [B,T,p]
         mu_emiss = (C_list @ z_t_samp.unsqueeze(-1)).squeeze(-1)  # [B,T,p]  
@@ -349,7 +373,11 @@ class KalmanFilter(nn.Module):
         # Initial term [B]
         mvn_init = MultivariateNormal(self.mu0, self.Sigma0)
         log_prob_init = mvn_init.log_prob(z_t_samp[:,0,:])
-        log_qseq, log_pseq = self.dynamics_parameter.elbo_terms()
+        if self.dyn_params.use_switching_dynamics:
+            log_qseq, log_pseq = self.dyn_params.elbo_terms()
+        else:
+            zeros = torch.zeros(B, T, device=y_t.device, dtype=y_t.dtype)
+            log_qseq, log_pseq = zeros, zeros
 
         # Entropy term [B,T]
         entropy = -mvn_smooth.log_prob(z_t_samp)
@@ -357,10 +385,6 @@ class KalmanFilter(nn.Module):
         # ELBO computation normalized by total observed frames
         num_el = mask_tens.sum().clamp(min=1.0)
         elbo = (
-            # The code `log_prob_trans` appears to be a function or variable name in Python. Without
-            # seeing the implementation of the function or how the variable is used in the code, it is
-            # difficult to determine its exact purpose. If you provide more context or the code
-            # implementation, I can help explain what it does.
             log_prob_trans.sum() +
             log_prob_emiss.sum() +
             log_prob_init.sum() +

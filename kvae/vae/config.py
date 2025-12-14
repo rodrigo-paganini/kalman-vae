@@ -14,6 +14,11 @@ class KVAEConfig:
 
     # LGSSM / mixture
     num_modes: int = 3              # K
+    sticky_p_stay: float = 0.9      # self-transition prob for sticky prior
+    tau_init: float = 0.5           # initial Gumbel-Softmax temperature
+    tau_decay_rate: float = 0.99    # multiplicative decay for tau
+    tau_decay_steps: int = 1        # apply tau decay every N epochs
+    use_switching_dynamics: bool = True  # toggle switching LDS
     noise_emission: float = 0.03    # measurement noise (on a)
     noise_transition: float = 0.02  # process noise (on z)  
     init_cov: float = 20.0          # initial state variance 
