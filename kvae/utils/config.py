@@ -14,9 +14,9 @@ class KVAEConfig:
 
     # LGSSM / mixture
     num_modes: int = 3              # K
-    sticky_p_stay: float = 0.9      # self-transition prob for sticky prior
-    tau_init: float = 0.5           # initial Gumbel-Softmax temperature
-    tau_decay_rate: float = 0.99    # multiplicative decay for tau
+    sticky_p_stay: float = 0.8      # self-transition prob for sticky prior
+    tau_init: float = 1.0           # initial Gumbel-Softmax temperature
+    tau_decay_rate: float = 0.995    # multiplicative decay for tau
     tau_decay_steps: int = 1        # apply tau decay every N epochs
     tau_min: float = 0.5           # minimum value for tau
     dynamics_model: str = "switching"  # "switching" or "lstm" for the linear dynamics network

@@ -302,6 +302,7 @@ def main():
                     tb_logger.log_video(sample["x_recon"][:1], name="val_inputation/seq_impute_recon.mp4")
                     tb_logger.log_video(sample["x_filtered"][:1], name="val_inputation/seq_impute_filt.mp4")
                     tb_logger.log_video(sample["x_imputed"][:1], name="val_inputation/seq_impute_smooth.mp4")
+                    tb_logger.log_figure(plot_state_probabilities(sample.get("state_probs")), name="val_inputation/seq_impute_states")
             # reconstruct_and_save(model, val_loader, device, runs_dir / "videos", prefix=f"vae_epoch{epoch:03d}")
         # Logging
         logger.info(
