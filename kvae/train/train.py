@@ -252,7 +252,6 @@ def main():
             scheduler.step()
         if cfg.dynamics_model.lower() == "switching" and epoch % cfg.tau_decay_steps == 0:
             dyn = model.kalman_filter.dyn_params
-            tb_logger.log_scalar('train/tau', dyn.tau, num_epoch=epoch)
             dyn.tau = max(cfg.tau_min, dyn.tau * cfg.tau_decay_rate)
             
         # Evaluate on fully observed data
