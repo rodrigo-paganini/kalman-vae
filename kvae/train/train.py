@@ -209,7 +209,7 @@ def main():
         yaml.dump(config, f)
 
     seed_all_modules(train_cfg.seed)
-    cfg = KVAEConfig(**(config.get('model', {})))
+    cfg = KVAEConfig(**(config.get('kvae', {})))
     device = parse_device(train_cfg.device)
     logger.info(f"Using device: {device}")
     dataset_cfg = config['dataset']
@@ -253,7 +253,7 @@ def main():
         if cfg.dynamics_model.lower() == "switching" and epoch % cfg.tau_decay_steps == 0:
             dyn = model.kalman_filter.dyn_params
             tb_logger.log_scalar('train/tau', dyn.tau, num_epoch=epoch)
-            dyn.tau = max(1e-3, dyn.tau * cfg.tau_decay_rate)
+            dyn.tau = max(cfg.tau_min, dyn.tau * cfg.tau_decay_rate)
             
         # Evaluate on fully observed data
         val_metrics   = evaluate(

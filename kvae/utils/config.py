@@ -18,6 +18,7 @@ class KVAEConfig:
     tau_init: float = 0.5           # initial Gumbel-Softmax temperature
     tau_decay_rate: float = 0.99    # multiplicative decay for tau
     tau_decay_steps: int = 1        # apply tau decay every N epochs
+    tau_min: float = 0.5           # minimum value for tau
     dynamics_model: str = "switching"  # "switching" or "lstm" for the linear dynamics network
     noise_emission: float = 0.03    # measurement noise (on a)
     noise_transition: float = 0.02  # process noise (on z)  
