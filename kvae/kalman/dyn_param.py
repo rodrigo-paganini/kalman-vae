@@ -17,6 +17,7 @@ class DynamicsParameter(nn.Module):
         self.C = nn.Parameter(C.clone())
 
         self.lstm_state = None
+        self.state_seq = None
 
         if self.K > 1:
             self.lstm = nn.LSTM(
@@ -33,6 +34,7 @@ class DynamicsParameter(nn.Module):
 
     def reset_state(self):
         self.lstm_state = None
+        self.state_seq = []
 
     def compute_step(self, a_tprev):
         batch = a_tprev.size(0)
@@ -41,6 +43,8 @@ class DynamicsParameter(nn.Module):
             A = self.A[0].expand(batch, -1, -1)
             B = self.B[0].expand(batch, -1, -1)
             C = self.C[0].expand(batch, -1, -1)
+            w = torch.ones(batch, 1, device=a_tprev.device, dtype=a_tprev.dtype)
+            self.state_seq.append(w)
             return A, B, C
 
         a_tprev = a_tprev.unsqueeze(1)
@@ -55,4 +59,5 @@ class DynamicsParameter(nn.Module):
         B = torch.einsum('bk,knm->bnm', w, self.B)
         C = torch.einsum('bk,kpn->bpn', w, self.C)
 
+        self.state_seq.append(w)
         return A, B, C

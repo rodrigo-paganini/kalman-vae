@@ -151,6 +151,7 @@ class KVAE(nn.Module):
             x_recon = torch.sigmoid(x_logits)
         else:
             x_recon = x_logits
+        state_probs = self.kalman_filter.dyn_params.state_seq
 
         return {
             "x_recon":       x_recon,
@@ -166,6 +167,7 @@ class KVAE(nn.Module):
             "Sigmas_pred":   Sigmas_pred,
             "ABC":           (A_list, B_list, C_list),
             "u":             u,
+            "state_probs":   state_probs,
         }
         
     

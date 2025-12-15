@@ -1,6 +1,7 @@
 import logging
 import torch
 from pathlib import Path
+import matplotlib.pyplot as plt
 from pytorch_lightning.loggers import TensorBoardLogger as PLTensorBoardLogger
 
 
@@ -151,3 +152,22 @@ class TensorBoardLogger:
         # add_video expects [N, T, C, H, W]
         exp.add_video(name, orig_vid.tile(1,1,3,1,1), 0, fps=fps) # saving only the last element
         exp.flush()
+
+    def log_figure(self, fig, name: str, num_epoch: int = None, close: bool = True):
+        """
+        Log a matplotlib figure to TensorBoard.
+
+        Args:
+            fig: Matplotlib figure object.
+            name: Tag under which the figure is stored.
+            num_epoch: Optional epoch index for the log step.
+            close: Whether to close the figure after logging to free memory.
+        """
+        if num_epoch is None:
+            num_epoch = self.global_epoch
+
+        exp = self.tb_logger.experiment
+        exp.add_figure(name, fig, global_step=num_epoch)
+        exp.flush()
+        if close:
+            plt.close(fig)

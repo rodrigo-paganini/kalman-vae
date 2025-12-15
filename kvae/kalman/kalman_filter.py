@@ -184,6 +184,12 @@ class KalmanFilter(nn.Module):
             m_col = m_t.view(batch, 1)
             y_for_dyn = m_col * y_t + (1.0 - m_col) * y_pred
 
+        # Stack regime sequences
+        if not use_batch_dyn:
+            state_seq = self.dyn_params.state_seq
+            if isinstance(state_seq, list) and len(state_seq) > 0:
+                self.dyn_params.state_seq = torch.stack(state_seq, 1)
+
         return (
             torch.stack(mus_filt, 1),
             torch.stack(Sigmas_filt, 1),
@@ -334,7 +340,7 @@ class KalmanFilter(nn.Module):
 
         # Process noise
         if Q_list is None:
-            Q_list = self.dyn_params.Q_seq
+            Q_list = getattr(self.dyn_params, "Q_seq", None)
         if Q_list is None:
             Q_list = self.Q.to(device=dev, dtype=dtp).expand(B, T, -1, -1)
 

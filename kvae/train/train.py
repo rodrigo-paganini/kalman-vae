@@ -9,6 +9,7 @@ import numpy as np
 from dataclasses import dataclass
 import yaml
 from tqdm import tqdm
+import matplotlib.pyplot as plt
 
 from kvae.train.imputation import impute_epoch
 from kvae.train.logging_utils import setup_logging, TensorBoardLogger
@@ -114,7 +115,46 @@ def evaluate(model, loader, device, kf_weight=1.0, tb_logger=None):
         tb_logger.log_image(outputs["x_recon"][:1], name='val/recon')
         tb_logger.log_video(batch["images"][:1], name='val/seq_orig')
         tb_logger.log_video(outputs["x_recon"][:1], name='val/seq_recon')
+        state_probs = outputs.get("state_probs")
+        if state_probs is not None:
+            tb_logger.log_figure(
+                plot_state_probabilities(state_probs),
+                name='val/state_probabilities'
+            )
     return epoch_losses
+
+
+def plot_state_probabilities(state_probs):
+    """
+    Create a heatmap figure of regime probabilities over time for a single sequence.
+    """
+    if state_probs is None:
+        return None
+    if isinstance(state_probs, list):
+        state_probs = torch.stack(state_probs, dim=1)
+    if state_probs.dim() == 3:
+        state_probs = state_probs[0]  # take first sequence in batch
+    if state_probs.dim() == 1:
+        state_probs = state_probs.unsqueeze(0)
+
+    state_np = state_probs.detach().cpu().numpy()
+    fig, ax = plt.subplots(figsize=(8, 4))
+    im = ax.imshow(
+        state_np.T,
+        aspect='auto',
+        origin='lower',
+        interpolation='nearest',
+        vmin=0.0,
+        vmax=1.0,
+        cmap='magma',
+    )
+    ax.set_xlabel("Time step")
+    ax.set_ylabel("State")
+    ax.set_title("Switch state")
+    cbar = fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+    cbar.set_label("probability")
+    fig.tight_layout()
+    return fig
 
 
 def set_training_phase(model, phase: str):

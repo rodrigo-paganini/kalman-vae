@@ -29,9 +29,10 @@ class SwitchingDynamicsParameter(nn.Module):
             self.K, input_dim=p, hidden_size=hidden_lstm
         )
         self.hidden_size = hidden_lstm
+        self.state_seq = None
 
     def reset_state(self):
-        self.switch_state_probabilities = Multinomial(probs=torch.ones(self.K) / self.K)
+        self.state_seq = None
 
     def compute_batch(self, a_seq, is_training=True):
         batch, T, _ = a_seq.size()
@@ -44,6 +45,7 @@ class SwitchingDynamicsParameter(nn.Module):
             self.log_qseq = torch.zeros(batch, T, device=a_seq.device, dtype=a_seq.dtype)
             self.log_pseq = torch.zeros(batch, T, device=a_seq.device, dtype=a_seq.dtype)
             self.Q_seq = Q
+            self.state_seq = torch.ones(batch, T, self.K, device=a_seq.device, dtype=a_seq.dtype)
             return A, B, C, Q
 
         logits, init_logits = self.markov_regime_posterior(a_seq)  # logits: [B, T, K, K], init_logits: [B,K]
@@ -85,6 +87,7 @@ class SwitchingDynamicsParameter(nn.Module):
         self.log_qseq = log_qseq
         self.log_pseq = log_pseq
         self.Q_seq = Q_seq
+        self.state_seq = y_seq
 
         return A_seq, B_seq, C_seq, Q_seq
 
