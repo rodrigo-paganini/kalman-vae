@@ -129,6 +129,39 @@ def create_runs_dir(logdir: str) -> Path:
     return Path(ckpt_root)
 
 
+def plot_state_probabilities(state_probs):
+    """
+    Create a heatmap figure of regime probabilities over time for a single sequence.
+    """
+    if state_probs is None:
+        return None
+    if isinstance(state_probs, list):
+        state_probs = torch.stack(state_probs, dim=1)
+    if state_probs.dim() == 3:
+        state_probs = state_probs[0]  # take first sequence in batch
+    if state_probs.dim() == 1:
+        state_probs = state_probs.unsqueeze(0)
+
+    state_np = state_probs.detach().cpu().numpy()
+    fig, ax = plt.subplots(figsize=(4, 3))
+    im = ax.imshow(
+        state_np.T,
+        aspect='auto',
+        origin='lower',
+        interpolation='nearest',
+        vmin=0.0,
+        vmax=1.0,
+        cmap='magma',
+    )
+    ax.set_xlabel("Time step")
+    ax.set_ylabel("State")
+    ax.set_title("Switch state")
+    cbar = fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+    cbar.set_label("probability")
+    fig.tight_layout()
+    return fig
+
+
 class Checkpointer:
     def __init__(
         self,

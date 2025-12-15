@@ -16,7 +16,7 @@ from kvae.train.logging_utils import setup_logging, TensorBoardLogger
 from kvae.utils.config import KVAEConfig
 from kvae.model.model import KVAE
 from kvae.train.utils import Checkpointer, build_dataloaders, parse_config, parse_device, seed_all_modules, \
-    create_runs_dir
+    create_runs_dir, plot_state_probabilities
 from kvae.train.testing import reconstruct_and_save, kalman_prediction_test, pre_vidsave_trans, save_frames
 
 
@@ -122,39 +122,6 @@ def evaluate(model, loader, device, kf_weight=1.0, tb_logger=None):
                 name='val/state_probabilities',
             )
     return epoch_losses
-
-
-def plot_state_probabilities(state_probs):
-    """
-    Create a heatmap figure of regime probabilities over time for a single sequence.
-    """
-    if state_probs is None:
-        return None
-    if isinstance(state_probs, list):
-        state_probs = torch.stack(state_probs, dim=1)
-    if state_probs.dim() == 3:
-        state_probs = state_probs[0]  # take first sequence in batch
-    if state_probs.dim() == 1:
-        state_probs = state_probs.unsqueeze(0)
-
-    state_np = state_probs.detach().cpu().numpy()
-    fig, ax = plt.subplots(figsize=(8, 4))
-    im = ax.imshow(
-        state_np.T,
-        aspect='auto',
-        origin='lower',
-        interpolation='nearest',
-        vmin=0.0,
-        vmax=1.0,
-        cmap='magma',
-    )
-    ax.set_xlabel("Time step")
-    ax.set_ylabel("State")
-    ax.set_title("Switch state")
-    cbar = fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
-    cbar.set_label("probability")
-    fig.tight_layout()
-    return fig
 
 
 def set_training_phase(model, phase: str):
