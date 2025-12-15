@@ -5,7 +5,7 @@ import torch.nn as nn
 class DynamicsParameter(nn.Module):
     def __init__(self, A, B, C, hidden_lstm=50):
         super().__init__()
-        self.use_switching_dynamics = False
+        self.is_switching_dynamics = False
         self.K = A.size(0)
         n = A.size(1)
         m = B.size(2)

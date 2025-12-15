@@ -5,6 +5,11 @@ import matplotlib.pyplot as plt
 from pytorch_lightning.loggers import TensorBoardLogger as PLTensorBoardLogger
 
 
+# This flag is used for controlling memory logging on TensorBoard.
+# It can be set to False to view details in a training, but should be True for long training runs.
+SOFT_MEMORY_LOGGING = True
+
+
 def setup_logging(log_file: str = None, level=logging.INFO):
     """
     Initialize Python logging and patch tqdm so it doesn't break the log output.
@@ -124,7 +129,7 @@ class TensorBoardLogger:
 
     def log_image(self, original_batch, name, num_epoch: int = None):
         if num_epoch is None:
-            num_epoch = self.global_epoch
+            num_epoch = self.global_epoch if not SOFT_MEMORY_LOGGING else 0
         assert original_batch.size(0) == 1, "Image logging only supports 1 image at a time."
 
         exp = self.tb_logger.experiment
@@ -141,7 +146,7 @@ class TensorBoardLogger:
             fps: Frames per second for the video
         """
         if num_epoch is None:
-            num_epoch = self.global_epoch
+            num_epoch = self.global_epoch if not SOFT_MEMORY_LOGGING else 0
 
         assert original_batch.size(0) == 1, "Video logging only supports 1 video at a time."
         exp = self.tb_logger.experiment
@@ -164,7 +169,7 @@ class TensorBoardLogger:
             close: Whether to close the figure after logging to free memory.
         """
         if num_epoch is None:
-            num_epoch = self.global_epoch
+            num_epoch = self.global_epoch if not SOFT_MEMORY_LOGGING else 0
 
         exp = self.tb_logger.experiment
         exp.add_figure(name, fig, global_step=num_epoch)

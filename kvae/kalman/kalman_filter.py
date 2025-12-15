@@ -132,7 +132,7 @@ class KalmanFilter(nn.Module):
             if mask_tens.shape != (batch, T):
                 mask_tens = mask_tens.view(batch, T)
 
-        use_batch_dyn = self.dyn_params.use_switching_dynamics
+        use_batch_dyn = self.dyn_params.is_switching_dynamics
         if use_batch_dyn:
             A_seq, B_seq, C_seq, Q_seq = self.dyn_params.compute_batch(
                 Y, is_training=self.training
@@ -379,7 +379,7 @@ class KalmanFilter(nn.Module):
         # Initial term [B]
         mvn_init = MultivariateNormal(self.mu0, self.Sigma0)
         log_prob_init = mvn_init.log_prob(z_t_samp[:,0,:])
-        if self.dyn_params.use_switching_dynamics:
+        if self.dyn_params.is_switching_dynamics:
             log_qseq, log_pseq = self.dyn_params.elbo_terms()
         else:
             zeros = torch.zeros(B, T, device=y_t.device, dtype=y_t.dtype)

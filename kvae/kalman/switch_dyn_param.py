@@ -7,7 +7,7 @@ from torch.nn.functional import gumbel_softmax
 class SwitchingDynamicsParameter(nn.Module):
     def __init__(self, A, B, C, Q=None, prior=None, hidden_lstm=32, markov_regime_posterior=None):
         super().__init__()
-        self.use_switching_dynamics = True
+        self.is_switching_dynamics = True
         self.K = A.size(0)
         n = A.size(1)
         m = B.size(2)

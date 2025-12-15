@@ -31,7 +31,7 @@ from pytorch_lightning.loggers import TensorBoardLogger
 from pytorch_lightning.callbacks import ModelCheckpoint
 from torch.utils.data import DataLoader, random_split
 
-from kvae.vae.config import KVAEConfig
+from kvae.utils.config import KVAEConfig
 from kvae.vae.vae import VAE
 from kvae.dataloader.dataloader import make_toy_dataset
 from kvae.dataloader.pymunk_dataset import PymunkNPZDataset

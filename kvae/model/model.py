@@ -33,7 +33,7 @@ class KVAE(nn.Module):
         B_in = torch.randn(self.K, self.z_dim, self.u_dim) * init_std
         C_in = torch.randn(self.K, self.a_dim, self.z_dim) * init_std
         # Choose either switching or original KVAE dynamics
-        if config.use_switching_dynamics:
+        if config.dynamics_model.lower() == "switching":
             prior = switch_dyn_param.StickyRegimePrior(self.K, p_stay=config.sticky_p_stay)
             regime_post = switch_dyn_param.MarkovVariationalRegimePosterior(
                 self.K, input_dim=self.a_dim, hidden_size=config.dynamics_hidden_dim
@@ -47,11 +47,13 @@ class KVAE(nn.Module):
                 markov_regime_posterior=regime_post,
             )
             dynamics_net.tau = config.tau_init
-        else:
+        elif config.dynamics_model.lower() == "lstm":
             dynamics_net = base_dyn_param.DynamicsParameter(
                 A_in, B_in, C_in,
                 hidden_lstm=config.dynamics_hidden_dim,
             )
+        else:
+            raise ValueError(f"Unknown dynamics model: {config.dynamics_model}")
 
         mu0 = torch.zeros(self.z_dim, dtype=torch.float32)
         Sigma0 = torch.eye(self.z_dim, dtype=torch.float32) * config.init_cov 

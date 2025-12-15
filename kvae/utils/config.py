@@ -18,7 +18,7 @@ class KVAEConfig:
     tau_init: float = 0.5           # initial Gumbel-Softmax temperature
     tau_decay_rate: float = 0.99    # multiplicative decay for tau
     tau_decay_steps: int = 1        # apply tau decay every N epochs
-    use_switching_dynamics: bool = False  # toggle switching LDS
+    dynamics_model: str = "switching"  # "switching" or "lstm" for the linear dynamics network
     noise_emission: float = 0.03    # measurement noise (on a)
     noise_transition: float = 0.02  # process noise (on z)  
     init_cov: float = 20.0          # initial state variance 
@@ -41,17 +41,6 @@ class KVAEConfig:
 
     # Alpha / dynamics network (alpha_rnn=True, alpha_units=50)
     dynamics_hidden_dim: int = 50      # LSTM hidden size ~ alpha_units
-
-    # Training / optimization
-    grad_clip_norm: float = 150.0      # max_grad_norm in TF
-    recon_weight: float = 0.3          # if you use it anywhere
-
-    init_lr: float = 0.001      # init_lr
-    decay_rate: float = 0.85    # decay_rate
-    decay_steps: int = 20       # decay_steps
-
-    # Inputation
-    generate_step: int = 5          # Number of steps to generate during imputation
     t_init_mask: int = 4            # Initial time step to start masking
     t_steps_mask: int = 12          # Number of steps to mask during imputation
 

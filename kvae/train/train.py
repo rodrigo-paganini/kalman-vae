@@ -13,7 +13,7 @@ import matplotlib.pyplot as plt
 
 from kvae.train.imputation import impute_epoch
 from kvae.train.logging_utils import setup_logging, TensorBoardLogger
-from kvae.vae.config import KVAEConfig
+from kvae.utils.config import KVAEConfig
 from kvae.model.model import KVAE
 from kvae.train.utils import Checkpointer, build_dataloaders, parse_config, parse_device, seed_all_modules, \
     create_runs_dir
@@ -119,7 +119,7 @@ def evaluate(model, loader, device, kf_weight=1.0, tb_logger=None):
         if state_probs is not None:
             tb_logger.log_figure(
                 plot_state_probabilities(state_probs),
-                name='val/state_probabilities'
+                name='val/state_probabilities',
             )
     return epoch_losses
 
@@ -175,7 +175,7 @@ def set_training_phase(model, phase: str):
         dyn.B.requires_grad = False
         dyn.C.requires_grad = False
 
-        if dyn.use_switching_dynamics:
+        if dyn.is_switching_dynamics:
             # Freeze regime posterior during VAE pretrain
             for p in dyn.markov_regime_posterior.parameters():
                 p.requires_grad = False
@@ -204,7 +204,7 @@ def set_training_phase(model, phase: str):
         dyn.C.requires_grad = True
 
         # Keep regime network frozen in warmup
-        if getattr(dyn, "use_switching_dynamics", False):
+        if getattr(dyn, "is_switching_dynamics", False):
             for p in dyn.markov_regime_posterior.parameters():
                 p.requires_grad = False
         else:
@@ -227,7 +227,7 @@ def set_training_phase(model, phase: str):
 
 def main():
     config = parse_config()
-    train_cfg = TrainingConfig(**config['training'])
+    train_cfg = TrainingConfig(**(config.get('training', {})))
     runs_dir = create_runs_dir(train_cfg.logdir)
     setup_logging(str(runs_dir / "train.log"))
     logger = logging.getLogger(__name__)
@@ -242,7 +242,7 @@ def main():
         yaml.dump(config, f)
 
     seed_all_modules(train_cfg.seed)
-    cfg = KVAEConfig()
+    cfg = KVAEConfig(**(config.get('model', {})))
     device = parse_device(train_cfg.device)
     logger.info(f"Using device: {device}")
     dataset_cfg = config['dataset']
@@ -256,7 +256,7 @@ def main():
     # LR decays every (decay_steps * num_batches) updates
     scheduler = torch.optim.lr_scheduler.ExponentialLR(
         optimizer,
-        gamma=cfg.decay_rate,   
+        gamma=train_cfg.decay_rate,   
     )
 
     for epoch in range(1, train_cfg.max_epochs + 1):
@@ -279,13 +279,15 @@ def main():
             logger.info(f"\n=== Switched to training phase '{phase}' at epoch {epoch} ===")
 
         train_metrics = train_one_epoch(
-            model, train_loader, optimizer, device, cfg.grad_clip_norm, scheduler, kf_weight, vae_weight, tb_logger
+            model, train_loader, optimizer, device, train_cfg.grad_clip_norm, scheduler, kf_weight, vae_weight, tb_logger
         )
-        if scheduler is not None and epoch % cfg.decay_steps == 0:
+        if scheduler is not None and epoch % train_cfg.decay_steps == 0:
             scheduler.step()
-        if cfg.use_switching_dynamics and epoch % cfg.tau_decay_steps == 0:
+        if cfg.dynamics_model.lower() == "switching" and epoch % cfg.tau_decay_steps == 0:
             dyn = model.kalman_filter.dyn_params
+            tb_logger.log_scalar('train/tau', dyn.tau, num_epoch=epoch)
             dyn.tau = max(1e-3, dyn.tau * cfg.tau_decay_rate)
+            
         # Evaluate on fully observed data
         val_metrics   = evaluate(
             model, val_loader, device, kf_weight, tb_logger
@@ -298,7 +300,7 @@ def main():
         # Log learning rate
         current_lr = optimizer.param_groups[0]['lr']
         tb_logger.log_scalar('train/learning_rate', current_lr, num_epoch=epoch)
-        if cfg.use_switching_dynamics:
+        if cfg.dynamics_model.lower() == "switching":
             tb_logger.log_scalar('train/tau', model.kalman_filter.dyn_params.tau, num_epoch=epoch)
 
         if train_cfg.add_imputation_plots and epoch % 5 == 0:
@@ -359,6 +361,9 @@ class TrainingConfig:
     gpus: int = 1
     lr: float = 1e-3
     batch_size: int = 32
+    grad_clip_norm: float = 10.0
+    decay_rate: float = 0.85
+    decay_steps: int = 20
     weight_decay: float = 0.0
     ckpt_every: int = 5
     pretrain_vae_epochs: int = 5  

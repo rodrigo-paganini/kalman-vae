@@ -5,7 +5,7 @@ dataset:
   # 'toy' or 'pymunk'
   type: pymunk
   # for 'pymunk' sets path to the .npz file containing 'images' and 'state'
-  path: /home/daniel/Documents/MVA/PGM/box.npz
+  path: /Users/rodrigopaganini/master/data/pgm/kvae/box.npz
   num_workers: 6
   val_split: 0.2
 
@@ -33,4 +33,16 @@ training:
   warmup_epochs: 10
   add_imputation_plots: true  
 
+kvae:
+  # LGSSM / mixture
+  num_modes: 3
+  sticky_p_stay: 0.9
+  tau_init: 0.5
+  tau_decay_rate: 0.99
+  tau_decay_steps: 1
+  dynamics_model: switching  # "switching" or "lstm"
+  noise_emission: 0.03
+  noise_transition: 0.02
+  init_cov: 20.0
+  init_kf_matrices: 0.05
 # Any other user fields are accepted and ignored by default

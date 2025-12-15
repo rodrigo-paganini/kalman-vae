@@ -10,7 +10,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from kvae.model.model import KVAE
-from kvae.vae.config import KVAEConfig
+from kvae.utils.config import KVAEConfig
 
 
 def set_deterministic_weights(model, seed=42):
@@ -30,13 +30,13 @@ def create_dummy_batch(batch_size=2, T=10, C=1, H=32, W=32, device='cpu'):
     }
 
 
-def test_imputation_outputs_unchanged():
+def test_lstm_imputation_outputs_unchanged():
     """
     Test that imputation produces the same outputs with fixed random weights.
     This acts as a regression test - if refactoring changes outputs, this fails.
     """
     device = 'cpu'
-    cfg = KVAEConfig()
+    cfg = KVAEConfig(dynamics_model="lstm")
     
     # Create model with deterministic weights
     model = KVAE(cfg).to(device)
@@ -54,7 +54,7 @@ def test_imputation_outputs_unchanged():
     
     # Run imputation twice - should get identical results
     with torch.no_grad():
-        with open('tests/fixtures/imputation_output_1.pt', 'rb') as f:
+        with open('tests/fixtures/imputation_output_lstm.pt', 'rb') as f:
             out1 = torch.load(f)
         
         out2 = model.impute(x, mask=mask)
@@ -66,7 +66,48 @@ def test_imputation_outputs_unchanged():
         assert key in out2, f"Missing key: {key}"
         
         diff = torch.abs(out1[key] - out2[key]).max().item()
-        assert diff < 1e-6, f"{key}: outputs differ by {diff}. If you are intentionally changing imputation, update the reference output."
+        assert diff < 1e-8, f"{key}: outputs differ by {diff}. If you are intentionally changing imputation, update the reference output."
+    
+    print("✓ Imputation produces identical outputs with same weights")
+
+
+def test_imputation_outputs_unchanged():
+    """
+    Test that imputation produces the same outputs with fixed random weights.
+    This acts as a regression test - if refactoring changes outputs, this fails.
+    """
+    device = 'cpu'
+    cfg = KVAEConfig(dynamics_model="switching")
+    
+    # Create model with deterministic weights
+    model = KVAE(cfg).to(device)
+    set_deterministic_weights(model, seed=42)
+    model.eval()
+    
+    # Create dummy data
+    batch = create_dummy_batch(batch_size=2, T=10, device=device)
+    x = batch['images']
+    B, T = x.shape[:2]
+    
+    # Create a planning mask (observe first 4, hide next 6)
+    mask = torch.ones(B, T, device=device)
+    mask[:, 4:10] = 0.0
+    
+    # Run imputation twice - should get identical results
+    with torch.no_grad():
+        with open('tests/fixtures/imputation_output_switching.pt', 'rb') as f:
+            out1 = torch.load(f)
+        
+        out2 = model.impute(x, mask=mask)
+    
+    # Check outputs are identical
+    keys = ['x_recon', 'x_imputed', 'x_filtered']
+    for key in keys:
+        assert key in out1, f"Missing key: {key}"
+        assert key in out2, f"Missing key: {key}"
+        
+        diff = torch.abs(out1[key] - out2[key]).max().item()
+        assert diff < 1e-8, f"{key}: outputs differ by {diff}. If you are intentionally changing imputation, update the reference output."
     
     print("✓ Imputation produces identical outputs with same weights")
 
