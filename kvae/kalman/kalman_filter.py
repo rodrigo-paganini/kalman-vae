@@ -394,7 +394,7 @@ class KalmanFilter(nn.Module):
             log_prob_trans.sum() +
             log_prob_emiss.sum() +
             log_prob_init.sum() +
-            log_qseq.sum() +
+            log_qseq.sum() -
             log_pseq.sum() +
             entropy.sum()
         ) / num_el
