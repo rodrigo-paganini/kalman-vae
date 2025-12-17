@@ -64,6 +64,7 @@ def impute_batch(model, batch, mask, device):
     x_recon    = imp_out["x_recon"]    # [B,T,C,H,W] (VAE baseline)
     x_imputed  = imp_out["x_imputed"]  # [B,T,C,H,W] (smoothing)
     x_filtered = imp_out["x_filtered"] # [B,T,C,H,W] (filtering)
+    state_probs = imp_out["state_probs"]
 
     # 1 = observed, 0 = missing -> we want missing
     unobs = (mask < 0.5)                 # [B,T]
@@ -112,6 +113,7 @@ def impute_batch(model, batch, mask, device):
         "mse_filt":   mse_filt,
         "mse_recon":  mse_recon,
         "baseline":   baseline,
+        "state_probs": state_probs,
     }
 
 
@@ -221,6 +223,7 @@ def impute_batch(model, batch, mask, device):
     x_recon    = imp_out["x_recon"]    # [B,T,C,H,W] (VAE baseline)
     x_imputed  = imp_out["x_imputed"]  # [B,T,C,H,W] (smoothing)
     x_filtered = imp_out["x_filtered"] # [B,T,C,H,W] (filtering)
+    state_probs = imp_out["state_probs"]
 
     # 1 = observed, 0 = missing -> we want missing
     unobs = (mask < 0.5)                 # [B,T]
@@ -269,4 +272,5 @@ def impute_batch(model, batch, mask, device):
         "mse_filt":   mse_filt,
         "mse_recon":  mse_recon,
         "baseline":   baseline,
+        "state_probs": state_probs,
     }

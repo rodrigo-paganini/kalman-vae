@@ -2,7 +2,7 @@ import torch
 from torch.distributions import MultivariateNormal
 import numpy as np
 from kalman_filter import KalmanFilter
-from dyn_param import DynamicsParameter
+from kvae.kalman.switch_dyn_param import SwitchingDynamicsParameter
 import matplotlib.pyplot as plt
 
 def simulate_rocket_batch(B, T, dt, std_dyn=2.0, std_meas=4.0):
@@ -91,7 +91,7 @@ C0 = C0.repeat(K, 1, 1)
 mu0    = torch.zeros(2)
 Sigma0 = torch.diag(torch.tensor([1., 1.], dtype=torch.float32))
 
-dyn_params = DynamicsParameter(A0.clone(), B0.clone(), C0.clone(), hidden_lstm=32)
+dyn_params = SwitchingDynamicsParameter(A0.clone(), B0.clone(), C0.clone(), hidden_lstm=32)
 kf = KalmanFilter(std_dyn, std_obs, mu0, Sigma0, dyn_params)
 
 # Testing all functions
@@ -301,5 +301,4 @@ plt.show()
 
 
 print("Debug")
-
 

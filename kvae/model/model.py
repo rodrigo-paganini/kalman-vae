@@ -3,7 +3,8 @@ import torch
 
 from kvae.vae.vae import Encoder, Decoder
 from kvae.kalman.kalman_filter import KalmanFilter
-from kvae.kalman.dyn_param import DynamicsParameter
+from kvae.kalman import dyn_param as base_dyn_param
+from kvae.kalman import switch_dyn_param as switch_dyn_param
 from kvae.vae.losses import vae_loss, count_active_units, LinearScheduler
 
 
@@ -29,11 +30,43 @@ class KVAE(nn.Module):
         self.a_dim = config.a_dim
         self.u_dim = config.u_dim
 
-        A_in = torch.eye(self.z_dim).unsqueeze(0).repeat(self.K, 1, 1)  # [K, z, z]
+        A_in = torch.eye(self.z_dim).unsqueeze(0).repeat(self.K, 1, 1)
+        # Initialize regimes with diverse dynamics
+        # A_in = torch.eye(self.z_dim).unsqueeze(0).repeat(self.K, 1, 1)
+        # A_in = A_in + 0.2 * torch.randn_like(A_in)
+        # for k in range(self.K):
+        #     eigvals = torch.linalg.eigvals(A_in[k])
+        #     rho = eigvals.abs().max().real
+        #     if rho > 0:
+        #         A_in[k] = A_in[k] / (rho + 1e-6) * 0.9  # spectral radius < 1 (?)
+
         init_std = config.init_kf_matrices 
         B_in = torch.randn(self.K, self.z_dim, self.u_dim) * init_std
         C_in = torch.randn(self.K, self.a_dim, self.z_dim) * init_std
-        dynamics_net = DynamicsParameter(A_in, B_in, C_in, hidden_lstm=config.dynamics_hidden_dim)
+        # Choose either switching or original KVAE dynamics
+        if config.dynamics_model.lower() == "switching":
+            prior = switch_dyn_param.StickyRegimePrior(self.K, p_stay=config.sticky_p_stay)
+            regime_post = switch_dyn_param.MarkovVariationalRegimePosterior(
+                self.K, input_dim=self.a_dim, hidden_size=config.dynamics_hidden_dim
+            )
+            Q_in = torch.eye(self.z_dim, dtype=torch.float32).unsqueeze(0).repeat(self.K, 1, 1) * config.noise_transition
+            # q_scales = 0.5 + torch.rand(self.K, self.z_dim)
+            # Q_in = torch.diag_embed(q_scales) * config.noise_transition
+            dynamics_net = switch_dyn_param.SwitchingDynamicsParameter(
+                A_in, B_in, C_in,
+                Q=Q_in,
+                prior=prior,
+                hidden_lstm=config.dynamics_hidden_dim,
+                markov_regime_posterior=regime_post,
+            )
+            dynamics_net.tau = config.tau_init
+        elif config.dynamics_model.lower() == "lstm":
+            dynamics_net = base_dyn_param.DynamicsParameter(
+                A_in, B_in, C_in,
+                hidden_lstm=config.dynamics_hidden_dim,
+            )
+        else:
+            raise ValueError(f"Unknown dynamics model: {config.dynamics_model}")
 
         mu0 = torch.zeros(self.z_dim, dtype=torch.float32)
         Sigma0 = torch.eye(self.z_dim, dtype=torch.float32) * config.init_cov 
@@ -133,6 +166,7 @@ class KVAE(nn.Module):
             x_recon = torch.sigmoid(x_logits)
         else:
             x_recon = x_logits
+        state_probs = self.kalman_filter.dyn_params.state_seq
 
         return {
             "x_recon":       x_recon,
@@ -148,6 +182,7 @@ class KVAE(nn.Module):
             "Sigmas_pred":   Sigmas_pred,
             "ABC":           (A_list, B_list, C_list),
             "u":             u,
+            "state_probs":   state_probs,
         }
         
     
@@ -235,6 +270,7 @@ class KVAE(nn.Module):
         mus_smooth             = outputs["mus_smooth"]          # [B,T,n]
         mus_filt               = outputs["mus_filt"]            # [B,T,n]
         A_list, B_list, C_list = outputs["ABC"]       
+        state_probs            = outputs["state_probs"]
 
         # Baseline decoder reconstruction from original a_samples
         x_recon_logits = self.decode_sequence(a_vae)       # [B,T,C,H,W]
@@ -261,4 +297,5 @@ class KVAE(nn.Module):
             "a_vae":      a_vae,
             "a_imputed":  a_imputed,
             "a_filtered": a_filtered,
+            "state_probs": state_probs,
         }

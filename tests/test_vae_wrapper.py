@@ -1,5 +1,5 @@
 import torch
-from kvae.vae.config import KVAEConfig
+from kvae.utils.config import KVAEConfig
 from kvae.vae.vae import VAE
 
 

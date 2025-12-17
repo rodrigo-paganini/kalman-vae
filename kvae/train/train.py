@@ -9,13 +9,14 @@ import numpy as np
 from dataclasses import dataclass
 import yaml
 from tqdm import tqdm
+import matplotlib.pyplot as plt
 
 from kvae.train.imputation import impute_epoch
 from kvae.train.logging_utils import setup_logging, TensorBoardLogger
-from kvae.vae.config import KVAEConfig
+from kvae.utils.config import KVAEConfig
 from kvae.model.model import KVAE
 from kvae.train.utils import Checkpointer, build_dataloaders, parse_config, parse_device, seed_all_modules, \
-    create_runs_dir
+    create_runs_dir, plot_state_probabilities
 from kvae.train.testing import reconstruct_and_save, kalman_prediction_test, pre_vidsave_trans, save_frames
 
 
@@ -129,6 +130,12 @@ def evaluate(model, loader, device, kf_weight=1.0, tb_logger=None):
         tb_logger.log_image(outputs["x_recon"][:1], name='val/recon')
         tb_logger.log_video(batch["images"][:1], name='val/seq_orig')
         tb_logger.log_video(outputs["x_recon"][:1], name='val/seq_recon')
+        state_probs = outputs.get("state_probs")
+        if state_probs is not None:
+            tb_logger.log_figure(
+                plot_state_probabilities(state_probs),
+                name='val/state_probabilities',
+            )
     return epoch_losses
 
 
@@ -150,16 +157,21 @@ def set_training_phase(model, phase: str):
         dyn.B.requires_grad = False
         dyn.C.requires_grad = False
 
-        if dyn.K > 1:
-            if hasattr(dyn, "lstm"):
-                for p in dyn.lstm.parameters():
-                    p.requires_grad = False
-            if hasattr(dyn, "mlp"):
-                for p in dyn.mlp.parameters():
-                    p.requires_grad = False
-            if hasattr(dyn, "head_w"):
-                for p in dyn.head_w.parameters():
-                    p.requires_grad = False
+        if dyn.is_switching_dynamics:
+            # Freeze regime posterior during VAE pretrain
+            for p in dyn.markov_regime_posterior.parameters():
+                p.requires_grad = False
+        else:
+            if dyn.K > 1:
+                if hasattr(dyn, "lstm"):
+                    for p in dyn.lstm.parameters():
+                        p.requires_grad = False
+                if hasattr(dyn, "mlp"):
+                    for p in dyn.mlp.parameters():
+                        p.requires_grad = False
+                if hasattr(dyn, "head_w"):
+                    for p in dyn.head_w.parameters():
+                        p.requires_grad = False
 
     # Warmup: train VAE + global A,B,C (mixture weights frozen)
     elif phase == "warmup":
@@ -169,19 +181,25 @@ def set_training_phase(model, phase: str):
 
         dyn.A.requires_grad = True
         dyn.B.requires_grad = True
+        if hasattr(dyn, "Q"):
+            dyn.Q.requires_grad = True
         dyn.C.requires_grad = True
 
-        # Keep dynamics network (mixture) frozen in warmup
-        if dyn.K > 1:
-            if hasattr(dyn, "lstm"):
-                for p in dyn.lstm.parameters():
-                    p.requires_grad = False
-            if hasattr(dyn, "mlp"):
-                for p in dyn.mlp.parameters():
-                    p.requires_grad = False
-            if hasattr(dyn, "head_w"):
-                for p in dyn.head_w.parameters():
-                    p.requires_grad = False
+        # Keep regime network frozen in warmup
+        if getattr(dyn, "is_switching_dynamics", False):
+            for p in dyn.markov_regime_posterior.parameters():
+                p.requires_grad = False
+        else:
+            if dyn.K > 1:
+                if hasattr(dyn, "lstm"):
+                    for p in dyn.lstm.parameters():
+                        p.requires_grad = False
+                if hasattr(dyn, "mlp"):
+                    for p in dyn.mlp.parameters():
+                        p.requires_grad = False
+                if hasattr(dyn, "head_w"):
+                    for p in dyn.head_w.parameters():
+                        p.requires_grad = False
 
     # Fine-tune everything
     elif phase == "all":
@@ -191,7 +209,7 @@ def set_training_phase(model, phase: str):
 
 def main():
     config = parse_config()
-    train_cfg = TrainingConfig(**config['training'])
+    train_cfg = TrainingConfig(**(config.get('training', {})))
     runs_dir = create_runs_dir(train_cfg.logdir)
     setup_logging(str(runs_dir / "train.log"))
     logger = logging.getLogger(__name__)
@@ -206,7 +224,7 @@ def main():
         yaml.dump(config, f)
 
     seed_all_modules(train_cfg.seed)
-    cfg = KVAEConfig()
+    cfg = KVAEConfig(**(config.get('kvae', {})))
     device = parse_device(train_cfg.device)
     logger.info(f"Using device: {device}")
     dataset_cfg = config['dataset']
@@ -220,8 +238,10 @@ def main():
     # LR decays every (decay_steps * num_batches) updates
     scheduler = torch.optim.lr_scheduler.ExponentialLR(
         optimizer,
-        gamma=cfg.decay_rate,   
+        gamma=train_cfg.decay_rate,   
     )
+    # Start tau decay after VAE pretrain and warmup phase
+    tau_decay_start_epoch = max(1, train_cfg.pretrain_vae_epochs + train_cfg.warmup_epochs + 1)
 
     for epoch in range(1, train_cfg.max_epochs + 1):
         if epoch <= train_cfg.pretrain_vae_epochs:
@@ -243,10 +263,15 @@ def main():
             logger.info(f"\n=== Switched to training phase '{phase}' at epoch {epoch} ===")
 
         train_metrics = train_one_epoch(
-            model, train_loader, optimizer, device, cfg.grad_clip_norm, scheduler, kf_weight, vae_weight, tb_logger, epoch = epoch
+            model, train_loader, optimizer, device, train_cfg.grad_clip_norm, scheduler, kf_weight, vae_weight, tb_logger, epoch = epoch
         )
-        if scheduler is not None and epoch % cfg.decay_steps == 0:
+        if scheduler is not None and epoch % train_cfg.decay_steps == 0:
             scheduler.step()
+        if cfg.dynamics_model.lower() == "switching" and epoch % cfg.tau_decay_steps == 0 and epoch >= tau_decay_start_epoch:
+            dyn = model.kalman_filter.dyn_params
+            epochs_since_tau_start = epoch - tau_decay_start_epoch
+            if epochs_since_tau_start % cfg.tau_decay_steps == 0:
+                dyn.tau = max(cfg.tau_min, dyn.tau * cfg.tau_decay_rate)
         # Evaluate on fully observed data
         val_metrics   = evaluate(
             model, val_loader, device, kf_weight, tb_logger
@@ -259,6 +284,8 @@ def main():
         # Log learning rate
         current_lr = optimizer.param_groups[0]['lr']
         tb_logger.log_scalar('train/learning_rate', current_lr, num_epoch=epoch)
+        if cfg.dynamics_model.lower() == "switching":
+            tb_logger.log_scalar('train/tau', model.kalman_filter.dyn_params.tau, num_epoch=epoch)
 
         if train_cfg.add_imputation_plots and epoch % 5 == 0:
             # Kalman prediction test
@@ -293,6 +320,7 @@ def main():
                     tb_logger.log_video(sample["x_recon"][:1], name="val_inputation/seq_impute_recon.mp4")
                     tb_logger.log_video(sample["x_filtered"][:1], name="val_inputation/seq_impute_filt.mp4")
                     tb_logger.log_video(sample["x_imputed"][:1], name="val_inputation/seq_impute_smooth.mp4")
+                    tb_logger.log_figure(plot_state_probabilities(sample.get("state_probs")), name="val_inputation/seq_impute_states")
             # reconstruct_and_save(model, val_loader, device, runs_dir / "videos", prefix=f"vae_epoch{epoch:03d}")
         # Logging
         logger.info(
@@ -318,6 +346,9 @@ class TrainingConfig:
     gpus: int = 1
     lr: float = 1e-3
     batch_size: int = 32
+    grad_clip_norm: float = 10.0
+    decay_rate: float = 0.85
+    decay_steps: int = 20
     weight_decay: float = 0.0
     ckpt_every: int = 5
     pretrain_vae_epochs: int = 5  

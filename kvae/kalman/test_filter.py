@@ -2,7 +2,7 @@ import numpy as np
 import torch
 import matplotlib.pyplot as plt
 from kalman_filter import KalmanFilter
-from dyn_param import DynamicsParameter
+from kvae.kalman.switch_dyn_param import SwitchingDynamicsParameter
 
 # ----- Rocket example - Simple Kalman filter  -----
 dt = 0.1
@@ -53,7 +53,7 @@ C_in = C.repeat(K, 1, 1)
 mu0    = torch.zeros(2, dtype=torch.float32)                     
 Sigma0 = torch.diag(torch.tensor([1**2, 1**2], dtype=torch.float32))
 
-dyn_param = DynamicsParameter(A_in, B_in, C_in)
+dyn_param = SwitchingDynamicsParameter(A_in, B_in, C_in)
 kf = KalmanFilter(std_dyn, std_obs, mu0, Sigma0, dyn_param)
 
 model_dtype = A.dtype

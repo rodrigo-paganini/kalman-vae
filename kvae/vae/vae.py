@@ -4,7 +4,7 @@ import torch.nn as nn
 
 from typing import Tuple
 
-from kvae.vae.config import KVAEConfig
+from kvae.utils.config import KVAEConfig
 import torch
 
 

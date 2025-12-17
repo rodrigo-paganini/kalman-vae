@@ -9,13 +9,24 @@ description = "KVAE implementation with PyTorch"
 readme = "README.md"
 requires-python = ">=3.10,<4.0"
 dependencies = [
-  "numpy==2.2.6",
-  "torch==2.9.0",
-  "moviepy==1.0.3",  # video logging in Tensorboard
+  "numpy",
+  "torch",
+  "moviepy",  # video logging in Tensorboard
+  "matplotlib",      # Used extensively for plotting
+  "tqdm",            # Progress bars in training
+  "imageio",         # Video saving in testing.py
+  "pyyaml",          # Config loading
 ]
 
 [project.optional-dependencies]
-dev = ["pytest==8.4.2", "tensorboard>=2.0", "pytorch-lightning>=2.0", "pyyaml>=6.0"]
+dev = [
+  "pytest",
+  "tensorboard",
+  "pytorch-lightning",  # initial vae only trainings
+  "pandas",          # Used in notebooks
+  "seaborn",        # Used in notebooks for heatmaps
+  "jupyter",         # For notebooks
+]
 
 [tool.setuptools.packages.find]
 where = ["."]
