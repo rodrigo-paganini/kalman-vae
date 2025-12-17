@@ -252,7 +252,7 @@ def main():
         )
         if scheduler is not None and epoch % train_cfg.decay_steps == 0:
             scheduler.step()
-        if cfg.use_switching_dynamics and epoch % cfg.tau_decay_steps == 0 and epoch >= tau_decay_start_epoch:
+        if cfg.dynamics_model.lower() == "switching" and epoch % cfg.tau_decay_steps == 0 and epoch >= tau_decay_start_epoch:
             dyn = model.kalman_filter.dyn_params
             epochs_since_tau_start = epoch - tau_decay_start_epoch
             if epochs_since_tau_start % cfg.tau_decay_steps == 0:
