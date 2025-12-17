@@ -37,10 +37,10 @@ kvae:
   # LGSSM / mixture
   num_modes: 3
   sticky_p_stay: 0.9
-  tau_init: 2
-  tau_decay_rate: 0.90
+  tau_init: 1
+  tau_decay_rate: 0.995
   tau_decay_steps: 1
-  tau_min: 0.5
+  tau_min: 0.2
   dynamics_model: switching  # "switching" or "lstm"
   noise_emission: 0.03
   noise_transition: 0.02
