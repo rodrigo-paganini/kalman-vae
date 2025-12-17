@@ -18,6 +18,7 @@ class KVAEConfig:
     tau_init: float = 1.0           # initial Gumbel-Softmax temperature
     tau_decay_rate: float = 0.995    # multiplicative decay for tau
     tau_decay_steps: int = 1        # apply tau decay every N epochs
+    tau_min: float = 0.2            # lower bound for tau
     use_switching_dynamics: bool = True  # toggle switching LDS
     noise_emission: float = 0.03    # measurement noise (on a)
     noise_transition: float = 0.02  # process noise (on z)  

@@ -258,6 +258,8 @@ def main():
         optimizer,
         gamma=cfg.decay_rate,   
     )
+    # Start tau decay after VAE pretrain and warmup phase
+    tau_decay_start_epoch = max(1, train_cfg.pretrain_vae_epochs + train_cfg.warmup_epochs + 1)
 
     for epoch in range(1, train_cfg.max_epochs + 1):
         if epoch <= train_cfg.pretrain_vae_epochs:
@@ -283,9 +285,11 @@ def main():
         )
         if scheduler is not None and epoch % cfg.decay_steps == 0:
             scheduler.step()
-        if cfg.use_switching_dynamics and epoch % cfg.tau_decay_steps == 0:
+        if cfg.use_switching_dynamics and epoch >= tau_decay_start_epoch:
             dyn = model.kalman_filter.dyn_params
-            dyn.tau = max(1e-3, dyn.tau * cfg.tau_decay_rate)
+            epochs_since_tau_start = epoch - tau_decay_start_epoch
+            if epochs_since_tau_start % cfg.tau_decay_steps == 0:
+                dyn.tau = max(cfg.tau_min, dyn.tau * cfg.tau_decay_rate)
         # Evaluate on fully observed data
         val_metrics   = evaluate(
             model, val_loader, device, kf_weight, tb_logger
