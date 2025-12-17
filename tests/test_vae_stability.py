@@ -1,3 +1,6 @@
+"""
+Regression tests to ensure imputation functionality remains stable during refactoring.
+"""
 import torch
 import torch.nn.functional as F
 from kvae.utils.config import KVAEConfig
@@ -36,7 +39,13 @@ def test_deterministic_forward_with_seed_gaussian():
     x1 = _make_dummy_batch(cfg, B=2, T=3)
     out1 = vae1(x1)
 
-    out2 = torch.load('tests/fixtures/out1_bernoulli.pt')
+    try:
+        out2 = torch.load('tests/fixtures/out1_bernoulli.pt')
+    except FileNotFoundError:
+        raise FileNotFoundError(
+            "Fixture file not found. Run `update_vae_fixture('tests/fixtures/out1_bernoulli.pt')` to create it." +\
+            "You can also run `pytest ./tests --no-stability` to skip these type of tests temporarily."
+        )
 
     assert out1['x_recon_mu'].shape == out2['x_recon_mu'].shape, "Output shape has changed. Update the fixture if this is intentional."
     assert torch.allclose(out1['x_recon_mu'], out2['x_recon_mu'], atol=1e-6), "Output values have changed. Update the fixture if this is intentional."
@@ -53,7 +62,11 @@ def test_deterministic_forward_with_seed():
     x1 = _make_dummy_batch(cfg, B=2, T=3)
     out1 = vae1(x1)
 
-    out2 = torch.load('tests/fixtures/out1_bernoulli.pt')
+    try:
+        out2 = torch.load('tests/fixtures/out1_bernoulli.pt')
+    except FileNotFoundError:
+        raise FileNotFoundError("Fixture file not found. Run `update_vae_fixture('tests/fixtures/out1_bernoulli.pt')` to create it." +\
+            "You can also run `pytest ./tests --no-stability` to skip these type of tests temporarily.")
 
     assert out1['x_recon_mu'].shape == out2['x_recon_mu'].shape, "Output shape has changed. Update the fixture if this is intentional."
     assert torch.allclose(out1['x_recon_mu'], out2['x_recon_mu'], atol=1e-6), "Output values have changed. Update the fixture if this is intentional."
@@ -96,11 +109,11 @@ def test_forward_backward_and_parameter_update():
     assert changed, "Optimizer step did not change model parameters"
 
 
-def update_fixture():
+def update_vae_fixture(filename):
     '''
-    Utility function to update the saved fixture output.
+    Utility function to create or update the saved fixture output.
     NEVER call this function during normal testing! It's just an auxiliary function to call when fixtures 
-    need to be updated.
+    need to be created or updated.
     Run this if VAE behavior changes intentionally.
     '''
     cfg = KVAEConfig(out_distr="gaussian")
@@ -109,5 +122,5 @@ def update_fixture():
     x1 = _make_dummy_batch(cfg, B=2, T=3)
     out1 = vae1(x1)
 
-    with open('tests/fixtures/out1_gaussian.pt', 'wb') as f:
+    with open(filename, 'wb') as f:
         torch.save(out1, f)

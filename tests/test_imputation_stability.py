@@ -55,7 +55,13 @@ def test_lstm_imputation_outputs_unchanged():
     # Run imputation twice - should get identical results
     with torch.no_grad():
         with open('tests/fixtures/imputation_output_lstm.pt', 'rb') as f:
-            out1 = torch.load(f)
+            try:
+                out1 = torch.load(f)
+            except FileNotFoundError:
+                raise FileNotFoundError(
+                    "Fixture file not found. Run `save_reference_outputs(model.impute(x, mask=mask), 'tests/fixtures/imputation_output_lstm.pt')` to create it." +\
+                    "You can also run `pytest ./tests --no-stability` to skip these type of tests temporarily."
+                )
         
         out2 = model.impute(x, mask=mask)
     
@@ -95,8 +101,14 @@ def test_imputation_outputs_unchanged():
     
     # Run imputation twice - should get identical results
     with torch.no_grad():
-        with open('tests/fixtures/imputation_output_switching.pt', 'rb') as f:
-            out1 = torch.load(f)
+        try:
+            with open('tests/fixtures/imputation_output_switching.pt', 'rb') as f:
+                out1 = torch.load(f)
+        except FileNotFoundError:
+            raise FileNotFoundError(
+                "Fixture file not found. Run `save_reference_outputs(model.impute(x, mask=mask), 'tests/fixtures/imputation_output_switching.pt')` to create it." +\
+                "You can also run `pytest ./tests --no-stability` to skip these type of tests temporarily."
+            )
         
         out2 = model.impute(x, mask=mask)
     
@@ -179,17 +191,18 @@ def test_against_reference(reference_path='tests/imputation_reference.npz'):
     assert max_diff < 1e-5, "Outputs changed after refactoring!"
 
 
-if __name__ == "__main__":
-    import sys
-    
-    if "--save-reference" in sys.argv:
-        # Step 1: Save reference outputs BEFORE refactoring
-        print("Creating reference outputs...")
-        outputs = test_imputation_outputs_unchanged()
-        save_reference_outputs(outputs)
-    else:
-        # Step 2: Test against reference AFTER refactoring
-        print("Testing imputation stability...")
-        test_imputation_outputs_unchanged()
-        print()
-        test_against_reference()
+def create_kvae_fixture(filename, device='cpu'):
+    '''
+    Utility function to create or update the saved fixture output.
+    NEVER call this function during normal testing! It's just an auxiliary function to call when fixtures 
+    need to be created or updated.
+    Run this if VAE behavior changes intentionally.
+    '''
+    cfg = KVAEConfig(out_distr="gaussian")
+    torch.manual_seed(1234)
+    kvae = KVAE(cfg).to(device)
+    x1 = create_dummy_batch(batch_size=2, T=10, device=device)
+    out1 = kvae(x1)
+
+    with open(filename, 'wb') as f:
+        torch.save(out1, f)
