@@ -28,15 +28,15 @@ class KVAE(nn.Module):
         self.a_dim = config.a_dim
         self.u_dim = config.u_dim
 
-        # A_in = torch.eye(self.z_dim).unsqueeze(0).repeat(self.K, 1, 1)
-        # Initialize regimes with diverse dynamics
         A_in = torch.eye(self.z_dim).unsqueeze(0).repeat(self.K, 1, 1)
-        A_in = A_in + 0.2 * torch.randn_like(A_in)
-        for k in range(self.K):
-            eigvals = torch.linalg.eigvals(A_in[k])
-            rho = eigvals.abs().max().real
-            if rho > 0:
-                A_in[k] = A_in[k] / (rho + 1e-6) * 0.9  # spectral radius < 1 (?)
+        # Initialize regimes with diverse dynamics
+        # A_in = torch.eye(self.z_dim).unsqueeze(0).repeat(self.K, 1, 1)
+        # A_in = A_in + 0.2 * torch.randn_like(A_in)
+        # for k in range(self.K):
+        #     eigvals = torch.linalg.eigvals(A_in[k])
+        #     rho = eigvals.abs().max().real
+        #     if rho > 0:
+        #         A_in[k] = A_in[k] / (rho + 1e-6) * 0.9  # spectral radius < 1 (?)
 
         init_std = config.init_kf_matrices 
         B_in = torch.randn(self.K, self.z_dim, self.u_dim) * init_std
@@ -47,9 +47,9 @@ class KVAE(nn.Module):
             regime_post = switch_dyn_param.MarkovVariationalRegimePosterior(
                 self.K, input_dim=self.a_dim, hidden_size=config.dynamics_hidden_dim
             )
-            # Q_in = torch.eye(self.z_dim, dtype=torch.float32).unsqueeze(0).repeat(self.K, 1, 1) * config.noise_transition
-            q_scales = 0.5 + torch.rand(self.K, self.z_dim)
-            Q_in = torch.diag_embed(q_scales) * config.noise_transition
+            Q_in = torch.eye(self.z_dim, dtype=torch.float32).unsqueeze(0).repeat(self.K, 1, 1) * config.noise_transition
+            # q_scales = 0.5 + torch.rand(self.K, self.z_dim)
+            # Q_in = torch.diag_embed(q_scales) * config.noise_transition
             dynamics_net = switch_dyn_param.SwitchingDynamicsParameter(
                 A_in, B_in, C_in,
                 Q=Q_in,
